@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audiobook Narrator Studio</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">声</div>
+          <div>
+            <h1>Narrator Studio</h1>
+            <p id="project-meta">No project loaded</p>
+          </div>
+        </div>
+
+        <form id="project-form" class="project-form">
+          <input id="project-id" placeholder="project-id" autocomplete="off" />
+          <input id="project-title" placeholder="Book title" autocomplete="off" />
+          <button type="submit" title="Create or open project">＋</button>
+        </form>
+
+        <label class="field-label" for="project-select">Projects</label>
+        <select id="project-select"></select>
+
+        <label class="field-label" for="chapter-select">Chapters</label>
+        <select id="chapter-select"></select>
+
+        <div class="side-actions">
+          <button id="new-chapter" title="New chapter">＋ Chapter</button>
+          <button id="run-analyze" title="Analyze story memory">Analyze</button>
+          <button id="run-annotate" title="Annotate passages">Annotate</button>
+          <button id="run-cast" title="Assign voices">Cast</button>
+        </div>
+
+        <div class="status" id="status">Ready</div>
+      </aside>
+
+      <main class="workspace">
+        <section class="editor-band">
+          <div class="toolbar">
+            <div class="chapter-fields">
+              <input id="chapter-id" placeholder="chapter-id" />
+              <input id="chapter-title" placeholder="Chapter title" />
+            </div>
+            <div class="toolbar-actions">
+              <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" hidden />
+              <button id="import-file" title="Import document">⇧ Import</button>
+              <button id="save-chapter" title="Save chapter text">Save</button>
+              <button id="synthesize" title="Generate narration">▶ Generate</button>
+              <select id="tts-backend" title="TTS backend">
+                <option value="script">Script</option>
+                <option value="elevenlabs">ElevenLabs</option>
+                <option value="openai">OpenAI</option>
+                <option value="macos_say">macOS Say</option>
+              </select>
+            </div>
+          </div>
+          <textarea id="book-editor" spellcheck="false"></textarea>
+        </section>
+
+        <section class="inspector-band">
+          <nav class="tabs" aria-label="Inspector views">
+            <button class="tab active" data-tab="memory">Memory</button>
+            <button class="tab" data-tab="characters">Characters</button>
+            <button class="tab" data-tab="annotations">Annotations</button>
+            <button class="tab" data-tab="voices">Voices</button>
+          </nav>
+
+          <div id="memory-panel" class="panel active">
+            <div class="panel-heading">
+              <h2>Book Understanding</h2>
+              <button id="save-memory" title="Save memory">Save</button>
+            </div>
+            <label>Plot summary</label>
+            <textarea id="plot-summary"></textarea>
+            <label>Current state</label>
+            <textarea id="current-state"></textarea>
+            <label>Themes</label>
+            <input id="themes" placeholder="theme, theme, theme" />
+            <label>Pronunciation notes</label>
+            <div id="pronunciation-list" class="kv-list"></div>
+            <button id="add-pronunciation" class="ghost">＋ Pronunciation</button>
+          </div>
+
+          <div id="characters-panel" class="panel">
+            <div class="panel-heading">
+              <h2>Characters</h2>
+              <div class="cluster">
+                <button id="add-character" title="Add character">＋</button>
+                <button id="save-characters" title="Save characters">Save</button>
+              </div>
+            </div>
+            <div id="characters-list" class="item-list"></div>
+          </div>
+
+          <div id="annotations-panel" class="panel">
+            <div class="panel-heading">
+              <h2>Performance Annotations</h2>
+              <button id="save-annotations" title="Save annotations">Save</button>
+            </div>
+            <div id="annotations-list" class="item-list annotation-list"></div>
+          </div>
+
+          <div id="voices-panel" class="panel">
+            <div class="panel-heading">
+              <h2>Voices</h2>
+              <div class="cluster">
+                <button id="load-elevenlabs" title="Load ElevenLabs voices">Load 11Labs</button>
+                <button id="add-cast" title="Add voice assignment">＋</button>
+                <button id="save-cast" title="Save voice cast">Save</button>
+              </div>
+            </div>
+            <div id="voice-library" class="voice-library"></div>
+            <div id="cast-list" class="item-list"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

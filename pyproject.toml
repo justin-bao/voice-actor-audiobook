@@ -1,0 +1,21 @@
+[project]
+name = "voice-actor-audiobook"
+version = "0.1.0"
+description = "Pipeline for annotating books with narration direction, speaker casting, and generated audiobook audio."
+requires-python = ">=3.11"
+dependencies = [
+  "pydantic>=2.7",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.78"]
+epub = ["ebooklib>=0.18", "beautifulsoup4>=4.12"]
+pdf = ["pypdf>=4.3"]
+
+[project.scripts]
+audiobook-narrator = "audiobook_narrator.cli:main"
+audiobook-narrator-web = "audiobook_narrator.web:main"
+
+[tool.ruff]
+line-length = 100
