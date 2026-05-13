@@ -7,23 +7,31 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="busy-overlay" class="busy-overlay" aria-live="polite" hidden>
+      <div class="busy-box">
+        <div class="spinner" aria-hidden="true"></div>
+        <div>
+          <strong id="busy-title">Working</strong>
+          <p id="busy-detail">Waiting for the model...</p>
+        </div>
+      </div>
+    </div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
           <div class="mark">声</div>
           <div>
             <h1>Narrator Studio</h1>
-            <p id="project-meta">No project loaded</p>
+            <p id="project-meta">No book loaded</p>
           </div>
         </div>
 
         <form id="project-form" class="project-form">
-          <input id="project-id" placeholder="project-id" autocomplete="off" />
           <input id="project-title" placeholder="Book title" autocomplete="off" />
           <button type="submit" title="Create or open project">＋</button>
         </form>
 
-        <label class="field-label" for="project-select">Projects</label>
+        <label class="field-label" for="project-select">Books</label>
         <select id="project-select"></select>
 
         <label class="field-label" for="chapter-select">Chapters</label>
@@ -33,7 +41,8 @@
           <button id="new-chapter" title="New chapter">＋ Chapter</button>
           <button id="run-analyze" title="Analyze story memory">Analyze</button>
           <button id="run-annotate" title="Annotate passages">Annotate</button>
-          <button id="run-cast" title="Assign voices">Cast</button>
+          <button id="run-cast" title="Assign voices to characters and speakers">Cast Voices</button>
+          <button id="delete-book" class="danger" title="Delete the whole book project">Delete Book</button>
         </div>
 
         <div class="status" id="status">Ready</div>
@@ -48,8 +57,12 @@
             </div>
             <div class="toolbar-actions">
               <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" hidden />
+              <input id="bulk-file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
               <button id="import-file" title="Import document">⇧ Import</button>
-              <button id="save-chapter" title="Save chapter text">Save</button>
+              <button id="bulk-import" title="Import selected chapters in filename order, then analyze">Bulk Import</button>
+              <button id="save-chapter" title="Save transcript text and annotations">Save Transcript</button>
+              <button id="reset-annotations" title="Remove annotations for this chapter">Reset Tags</button>
+              <button id="delete-chapter" class="danger" title="Delete this chapter">Delete Chapter</button>
               <button id="synthesize" title="Generate narration">▶ Generate</button>
               <select id="tts-backend" title="TTS backend">
                 <option value="script">Script</option>
@@ -59,7 +72,11 @@
               </select>
             </div>
           </div>
-          <textarea id="book-editor" spellcheck="false"></textarea>
+          <div id="transcript-wrap" class="editor-view active">
+            <textarea id="book-editor" spellcheck="false"></textarea>
+            <div id="inline-annotations" class="inline-annotations" hidden></div>
+            <textarea id="embedded-annotations-editor" spellcheck="false" hidden></textarea>
+          </div>
         </section>
 
         <section class="inspector-band">
@@ -121,6 +138,6 @@
       </main>
     </div>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=20260513-bulk-import"></script>
   </body>
 </html>

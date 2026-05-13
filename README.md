@@ -57,6 +57,26 @@ NARRATION_TTS_MODEL=gpt-4o-mini-tts
 
 The OpenAI provider is optional; the code falls back to deterministic local heuristics if the package or key is missing. On macOS, the `say` backend can generate local audio for quick tests, though it will not match modern neural TTS quality.
 
+### Langfuse Tracing
+
+For clearer monitoring of OpenAI calls, install the optional tracing dependency:
+
+```bash
+python3 -m pip install -e ".[langfuse]"
+```
+
+Then set Langfuse credentials in `.env`:
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+# or https://us.cloud.langfuse.com for the US region
+LANGFUSE_ENABLED=true
+```
+
+When enabled, Analyze and Annotate are grouped into named Langfuse traces, and OpenAI requests are captured through the Langfuse OpenAI wrapper. Terminal logs still show provider selection, model, request sizes, and fallback reasons.
+
 ### ElevenLabs Voices
 
 Set your API key and voice IDs in `.env`:

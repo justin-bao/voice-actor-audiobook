@@ -1,11 +1,15 @@
 const state = {
   projects: [],
+  chapters: [],
   project: null,
   selectedChapterId: null,
   memory: null,
   annotations: [],
+  annotatedText: "",
   cast: null,
   elevenVoices: [],
+  pendingDeleteChapterId: null,
+  pendingDeleteBookId: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,32 +32,51 @@ function setStatus(message) {
   $("status").textContent = message;
 }
 
+function setBusy(isBusy, title = "Working", detail = "Waiting for the model...") {
+  $("busy-title").textContent = title;
+  $("busy-detail").textContent = detail;
+  $("busy-overlay").hidden = !isBusy;
+  document.querySelectorAll("button, input, select, textarea").forEach((element) => {
+    element.disabled = isBusy;
+  });
+}
+
 async function refreshProjects() {
   const payload = await api("/api/projects");
   state.projects = payload.projects || [];
   $("project-select").innerHTML = state.projects
-    .map((p) => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.title)} · ${escapeHtml(p.project_id)}</option>`)
+    .map((p) => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.title)}</option>`)
     .join("");
   if (!state.project && state.projects.length) {
     await loadProject(state.projects[0].project_id);
+  } else if (!state.projects.length) {
+    state.project = null;
+    state.memory = null;
+    state.cast = null;
+    $("project-meta").textContent = "No book loaded";
+    clearChapterUi();
   }
 }
 
 async function loadProject(projectId, chapterId = null) {
   if (!projectId) return;
+  resetDeleteButton();
+  resetBookDeleteButton();
   const query = chapterId ? `?chapter=${encodeURIComponent(chapterId)}` : "";
   const payload = await api(`/api/projects/${encodeURIComponent(projectId)}${query}`);
   state.project = payload.config;
   state.selectedChapterId = payload.selected_chapter_id;
   state.memory = payload.memory;
   state.annotations = payload.annotations || [];
+  state.annotatedText = payload.annotated_text || "";
+  state.chapters = payload.chapters || [];
   state.cast = payload.cast;
   renderProject(payload);
   setStatus(`${payload.config.title} loaded`);
 }
 
 function renderProject(payload) {
-  $("project-meta").textContent = `${payload.config.title} · ${payload.config.language}`;
+  $("project-meta").textContent = payload.config.title;
   $("project-select").value = payload.config.project_id;
   $("chapter-select").innerHTML = payload.chapters
     .map((c) => `<option value="${escapeHtml(c.chapter_id)}">${escapeHtml(c.title || c.chapter_id)}</option>`)
@@ -65,7 +88,8 @@ function renderProject(payload) {
   $("book-editor").value = payload.source_text || "";
   renderMemory();
   renderCharacters();
-  renderAnnotations();
+  renderAnnotationsPanel();
+  renderTranscript();
   renderCast();
 }
 
@@ -74,8 +98,7 @@ function renderMemory() {
   $("plot-summary").value = memory.plot_summary || "";
   $("current-state").value = memory.current_state || "";
   $("themes").value = (memory.themes || []).join(", ");
-  const notes = memory.pronunciation_notes || {};
-  $("pronunciation-list").innerHTML = Object.entries(notes)
+  $("pronunciation-list").innerHTML = Object.entries(memory.pronunciation_notes || {})
     .map(([key, value]) => pronunciationRow(key, value))
     .join("");
 }
@@ -110,27 +133,58 @@ function renderCharacters() {
     .join("");
 }
 
-function renderAnnotations() {
-  $("annotations-list").innerHTML = state.annotations
-    .map((row, index) => `
-      <article class="item annotation-item" data-index="${index}">
-        <div class="item-head">
-          <div class="item-title">${escapeHtml(row.passage_id || `passage-${index}`)}</div>
-          <button class="danger remove-annotation" title="Remove">×</button>
-        </div>
-        <div class="annotation-grid">
-          <input class="ann-speaker" value="${escapeAttr(row.speaker || "Narrator")}" placeholder="speaker" />
-          ${selectHtml("ann-emotion", emotions, row.emotion || "neutral")}
-          ${selectHtml("ann-delivery", deliveries, row.delivery || "matter-of-fact")}
-          ${selectHtml("ann-pace", paces, row.pace || "medium")}
-          <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
-          <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
-          <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" title="pause ms" />
-          <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity" />
-        </div>
-      </article>
-    `)
-    .join("");
+function renderAnnotationsPanel() {
+  $("annotations-list").innerHTML = state.annotations.length
+    ? `<div class="empty-note">Annotations are editable directly in the transcript. Use Save Transcript to persist changes.</div>`
+    : `<div class="empty-note">Run Annotate to add editable speaker, emotion, delivery, and pacing controls to the transcript.</div>`;
+}
+
+function renderTranscript() {
+  $("embedded-annotations-editor").value = state.annotatedText || buildEmbeddedAnnotationText(state.annotations);
+  $("book-editor").hidden = state.annotations.length > 0;
+  $("inline-annotations").hidden = state.annotations.length === 0;
+  $("inline-annotations").innerHTML = state.annotations.length
+    ? state.annotations.map((row, index) => inlineAnnotationHtml(row, index)).join("")
+    : "";
+}
+
+function inlineAnnotationHtml(row, index) {
+  return `
+    <article class="inline-annotation-item" data-index="${index}">
+      <div class="annotation-meta-row">
+        <input class="ann-speaker" value="${escapeAttr(row.speaker || "Narrator")}" placeholder="speaker" />
+        ${selectHtml("ann-emotion", emotions, row.emotion || "neutral")}
+        ${selectHtml("ann-delivery", deliveries, row.delivery || "matter-of-fact")}
+        ${selectHtml("ann-pace", paces, row.pace || "medium")}
+        <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity" />
+        <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" title="pause ms" />
+      </div>
+      <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
+      <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
+    </article>
+  `;
+}
+
+function buildEmbeddedAnnotationText(annotations) {
+  if (!annotations.length) return "";
+  const title = $("chapter-title").value || state.selectedChapterId || "Chapter";
+  const lines = [`# ${title}`, ""];
+  annotations.forEach((row) => {
+    const meta = [
+      `id=${row.passage_id || ""}`,
+      `speaker=${row.speaker || "Narrator"}`,
+      `emotion=${row.emotion || "neutral"}`,
+      `delivery=${row.delivery || "matter-of-fact"}`,
+      `pace=${row.pace || "medium"}`,
+      `intensity=${Number(row.intensity || 3)}`,
+      `pause_ms=${Number(row.pause_after_ms || 350)}`,
+    ];
+    lines.push(`[[${meta.join(" | ")}]]`);
+    if (row.rationale) lines.push(`// ${row.rationale}`);
+    lines.push(row.text || "");
+    lines.push("");
+  });
+  return lines.join("\n").trimEnd() + "\n";
 }
 
 function renderCast() {
@@ -169,9 +223,19 @@ function selectHtml(className, options, selected) {
 }
 
 async function saveChapter() {
-  const projectId = state.project?.project_id;
-  if (!projectId) return;
-  await api(`/api/projects/${encodeURIComponent(projectId)}/chapters`, {
+  if (!state.project || !state.selectedChapterId) return;
+  if (state.annotations.length) {
+    const annotations = collectAnnotations();
+    await saveAnnotationsPayload(annotations);
+    await saveAnnotatedTextPayload(buildEmbeddedAnnotationText(annotations));
+    state.annotations = annotations;
+    state.annotatedText = buildEmbeddedAnnotationText(annotations);
+    renderAnnotationsPanel();
+    renderTranscript();
+    setStatus("Transcript annotations saved");
+    return;
+  }
+  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapters`, {
     method: "POST",
     body: JSON.stringify({
       chapter_id: $("chapter-id").value.trim(),
@@ -179,8 +243,22 @@ async function saveChapter() {
       text: $("book-editor").value,
     }),
   });
-  await loadProject(projectId, $("chapter-id").value.trim());
-  setStatus("Chapter saved");
+  await loadProject(state.project.project_id, $("chapter-id").value.trim());
+  setStatus("Transcript saved");
+}
+
+async function saveAnnotationsPayload(annotations) {
+  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/annotations/${encodeURIComponent(state.selectedChapterId)}`, {
+    method: "POST",
+    body: JSON.stringify({ annotations }),
+  });
+}
+
+async function saveAnnotatedTextPayload(text) {
+  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/annotated-text/${encodeURIComponent(state.selectedChapterId)}`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
 }
 
 async function saveMemory() {
@@ -225,10 +303,9 @@ function collectMemory() {
   return memory;
 }
 
-async function saveAnnotations() {
-  if (!state.project || !state.selectedChapterId) return;
+function collectAnnotations() {
   const annotations = [];
-  document.querySelectorAll(".annotation-item").forEach((item, index) => {
+  document.querySelectorAll(".inline-annotation-item").forEach((item, index) => {
     const original = state.annotations[Number(item.dataset.index)] || {};
     annotations.push({
       ...original,
@@ -246,12 +323,88 @@ async function saveAnnotations() {
       pronunciation_hints: original.pronunciation_hints || {},
     });
   });
-  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/annotations/${encodeURIComponent(state.selectedChapterId)}`, {
-    method: "POST",
-    body: JSON.stringify({ annotations }),
-  });
-  state.annotations = annotations;
-  setStatus("Annotations saved");
+  return annotations;
+}
+
+async function resetAnnotations() {
+  if (!state.project || !state.selectedChapterId) return;
+  setStatus(`Resetting annotations for ${state.selectedChapterId}...`);
+  try {
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/reset-annotations/${encodeURIComponent(state.selectedChapterId)}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.annotations = [];
+    state.annotatedText = "";
+    renderAnnotationsPanel();
+    renderTranscript();
+    setStatus("Chapter annotations reset");
+  } catch (error) {
+    setStatus(`Reset failed: ${error.message}`);
+  }
+}
+
+async function deleteCurrentChapter() {
+  if (!state.project || !state.selectedChapterId) return;
+  const chapterId = state.selectedChapterId;
+  const button = $("delete-chapter");
+  if (state.pendingDeleteChapterId !== chapterId) {
+    state.pendingDeleteChapterId = chapterId;
+    button.textContent = "Confirm Delete";
+    button.classList.add("armed");
+    setStatus(`Click Confirm Delete to remove ${chapterId}`);
+    return;
+  }
+  button.disabled = true;
+  setStatus(`Deleting ${chapterId}...`);
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/delete-chapter/${encodeURIComponent(chapterId)}`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    resetDeleteButton();
+    const remaining = payload.remaining_chapter_ids || [];
+    if (remaining.length) {
+      await loadProject(state.project.project_id, remaining[0]);
+    } else {
+      clearChapterUi();
+    }
+    setStatus(`Deleted ${chapterId}`);
+  } catch (error) {
+    setStatus(`Delete failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function deleteCurrentBook() {
+  if (!state.project) return;
+  const bookId = state.project.project_id;
+  const button = $("delete-book");
+  if (state.pendingDeleteBookId !== bookId) {
+    state.pendingDeleteBookId = bookId;
+    button.textContent = "Confirm Book Delete";
+    button.classList.add("armed");
+    setStatus(`Click Confirm Book Delete to remove ${state.project.title}`);
+    return;
+  }
+  button.disabled = true;
+  setStatus(`Deleting book ${state.project.title}...`);
+  try {
+    await api(`/api/projects/${encodeURIComponent(bookId)}/delete-project`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    state.project = null;
+    clearChapterUi();
+    resetBookDeleteButton();
+    await refreshProjects();
+    setStatus(`Deleted book ${bookId}`);
+  } catch (error) {
+    setStatus(`Delete book failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function saveCast() {
@@ -285,16 +438,31 @@ async function saveCast() {
 
 async function runStep(step) {
   if (!state.project) return;
-  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
-    method: "POST",
-    body: JSON.stringify({
-      step,
-      chapter_id: state.selectedChapterId,
-      backend: $("tts-backend").value,
-    }),
-  });
-  await loadProject(state.project.project_id, state.selectedChapterId);
-  setStatus(`${step} complete`);
+  const busyCopy = {
+    analyze: ["Analyzing", "Updating plot, character memory, and story understanding..."],
+    annotate: ["Annotating", "Waiting on narration annotations, speaker labels, and emotion tags..."],
+    cast: ["Casting Voices", "Assigning voices to characters and speakers..."],
+    synthesize: ["Generating", "Creating narration output..."],
+  }[step] || ["Working", "Processing..."];
+  setBusy(true, busyCopy[0], busyCopy[1]);
+  setStatus(`${step} started`);
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({
+        step,
+        chapter_id: state.selectedChapterId,
+        backend: $("tts-backend").value,
+      }),
+    });
+    await loadProject(state.project.project_id, state.selectedChapterId);
+    const llm = payload.llm ? ` with ${payload.llm.provider}${payload.llm.model ? ` (${payload.llm.model})` : ""}` : "";
+    setStatus(`${step} complete${llm}`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function importFile(file) {
@@ -307,6 +475,30 @@ async function importFile(file) {
   });
   await loadProject(state.project.project_id, payload.manifest.chapter_id);
   setStatus(`${file.name} imported`);
+}
+
+async function bulkImportFiles(fileList) {
+  if (!state.project || !fileList?.length) return;
+  const files = Array.from(fileList).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  setBusy(true, "Bulk Importing", `Importing and analyzing ${files.length} chapters in order...`);
+  setStatus(`Bulk import started for ${files.length} chapters`);
+  try {
+    const uploads = [];
+    for (const file of files) {
+      uploads.push({ filename: file.name, data: await readAsDataUrl(file) });
+    }
+    const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/bulk-import`, {
+      method: "POST",
+      body: JSON.stringify({ files: uploads, analyze: true }),
+    });
+    const last = payload.manifests?.at(-1)?.chapter_id || state.selectedChapterId;
+    await loadProject(state.project.project_id, last);
+    setStatus(`Imported ${payload.manifests?.length || 0} chapters and updated memory`);
+  } catch (error) {
+    setStatus(`Bulk import failed: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function readAsDataUrl(file) {
@@ -346,15 +538,15 @@ function addCast() {
 function wireEvents() {
   $("project-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const projectId = $("project-id").value.trim();
     const title = $("project-title").value.trim();
-    if (!projectId || !title) return;
-    await api("/api/projects", {
+    if (!title) return;
+    const project = await api("/api/projects", {
       method: "POST",
-      body: JSON.stringify({ project_id: projectId, title, language: "zh" }),
+      body: JSON.stringify({ title, language: "zh" }),
     });
+    $("project-title").value = "";
     await refreshProjects();
-    await loadProject(projectId);
+    await loadProject(project.project_id);
   });
 
   $("project-select").addEventListener("change", (event) => loadProject(event.target.value));
@@ -366,12 +558,18 @@ function wireEvents() {
     $("book-editor").value = "";
     state.selectedChapterId = next;
     state.annotations = [];
-    renderAnnotations();
+    state.annotatedText = "";
+    resetDeleteButton();
+    renderAnnotationsPanel();
+    renderTranscript();
   });
   $("save-chapter").addEventListener("click", saveChapter);
+  $("reset-annotations").addEventListener("click", resetAnnotations);
+  $("delete-chapter").addEventListener("click", deleteCurrentChapter);
+  $("delete-book").addEventListener("click", deleteCurrentBook);
   $("save-memory").addEventListener("click", saveMemory);
   $("save-characters").addEventListener("click", saveMemory);
-  $("save-annotations").addEventListener("click", saveAnnotations);
+  $("save-annotations").addEventListener("click", saveChapter);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
   $("run-analyze").addEventListener("click", () => runStep("analyze"));
@@ -379,16 +577,15 @@ function wireEvents() {
   $("run-cast").addEventListener("click", () => runStep("cast"));
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("import-file").addEventListener("click", () => $("file-input").click());
+  $("bulk-import").addEventListener("click", () => $("bulk-file-input").click());
   $("file-input").addEventListener("change", (event) => importFile(event.target.files[0]));
+  $("bulk-file-input").addEventListener("change", (event) => bulkImportFiles(event.target.files));
   $("add-pronunciation").addEventListener("click", () => {
     $("pronunciation-list").insertAdjacentHTML("beforeend", pronunciationRow());
   });
   $("add-character").addEventListener("click", addCharacter);
   $("characters-list").addEventListener("click", (event) => {
     if (event.target.matches(".remove-character")) event.target.closest(".character-item").remove();
-  });
-  $("annotations-list").addEventListener("click", (event) => {
-    if (event.target.matches(".remove-annotation")) event.target.closest(".annotation-item").remove();
   });
   $("pronunciation-list").addEventListener("click", (event) => {
     if (event.target.matches(".remove-row")) event.target.closest(".kv-row").remove();
@@ -415,6 +612,35 @@ function wireEvents() {
       $(`${tab.dataset.tab}-panel`).classList.add("active");
     });
   });
+}
+
+function clearChapterUi() {
+  state.selectedChapterId = null;
+  state.chapters = [];
+  state.annotations = [];
+  state.annotatedText = "";
+  $("chapter-select").innerHTML = "";
+  $("chapter-id").value = "ch01";
+  $("chapter-title").value = "";
+  $("book-editor").value = "";
+  renderAnnotationsPanel();
+  renderTranscript();
+}
+
+function resetDeleteButton() {
+  state.pendingDeleteChapterId = null;
+  const button = $("delete-chapter");
+  if (!button) return;
+  button.textContent = "Delete Chapter";
+  button.classList.remove("armed");
+}
+
+function resetBookDeleteButton() {
+  state.pendingDeleteBookId = null;
+  const button = $("delete-book");
+  if (!button) return;
+  button.textContent = "Delete Book";
+  button.classList.remove("armed");
 }
 
 function escapeHtml(value) {

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Protocol
+from typing import Iterator, Protocol
 
 from dotenv import load_dotenv
 
@@ -15,43 +18,221 @@ from audiobook_narrator.models import JsonDict, Passage
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+
+def langfuse_configured() -> bool:
+    enabled = os.getenv("LANGFUSE_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
+    return enabled and bool(os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY"))
+
+
+def langfuse_client():
+    if not langfuse_configured():
+        return None
+    try:
+        from langfuse import get_client
+    except ImportError:
+        logger.warning("Langfuse configured but package is not installed. Install with: python3 -m pip install -e '.[langfuse]'")
+        return None
+    try:
+        client = get_client()
+        logger.info("Langfuse tracing enabled base_url=%s", os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"))
+        return client
+    except Exception as exc:
+        logger.warning("Langfuse initialization failed: %s", exc)
+        return None
+
+
+@contextmanager
+def langfuse_observation(
+    name: str,
+    *,
+    as_type: str = "span",
+    input: object | None = None,
+    metadata: dict | None = None,
+    model: str | None = None,
+) -> Iterator[object | None]:
+    client = langfuse_client()
+    if client is None:
+        with nullcontext(None) as observation:
+            yield observation
+        return
+
+    kwargs = {"as_type": as_type, "name": name}
+    if model:
+        kwargs["model"] = model
+    try:
+        manager = client.start_as_current_observation(**kwargs)
+        observation = manager.__enter__()
+        try:
+            update = {}
+            if input is not None:
+                update["input"] = input
+            if metadata:
+                update["metadata"] = metadata
+            if update:
+                observation.update(**update)
+        except Exception as exc:
+            logger.warning("Langfuse observation update failed name=%s error=%s", name, exc)
+    except Exception as exc:
+        logger.warning("Langfuse observation setup failed name=%s error=%s", name, exc)
+        with nullcontext(None) as observation:
+            yield observation
+        return
+
+    exc_info = (None, None, None)
+    try:
+        yield observation
+    except BaseException:
+        exc_info = sys.exc_info()
+        raise
+    finally:
+        try:
+            manager.__exit__(*exc_info)
+        except Exception as exc:
+            logger.warning("Langfuse observation close failed name=%s error=%s", name, exc)
+
+
+def update_langfuse_observation(observation: object | None, **kwargs: object) -> None:
+    if observation is None:
+        return
+    try:
+        observation.update(**kwargs)
+    except Exception as exc:
+        logger.warning("Langfuse observation update failed: %s", exc)
+
+
+def flush_langfuse() -> None:
+    client = langfuse_client()
+    if client is None:
+        return
+    try:
+        client.flush()
+    except Exception as exc:
+        logger.warning("Langfuse flush failed: %s", exc)
+
+
+def score_langfuse_current_trace(scores: list[dict[str, object]]) -> None:
+    client = langfuse_client()
+    if client is None:
+        return
+    for score in scores:
+        try:
+            client.score_current_trace(
+                name=str(score["name"]),
+                value=score["value"],
+                data_type=score.get("data_type"),  # type: ignore[arg-type]
+                comment=str(score.get("comment", "")),
+                metadata=score.get("metadata"),
+            )
+        except Exception as exc:
+            logger.warning("Langfuse score failed name=%s error=%s", score.get("name"), exc)
+
 
 class LLMProvider(Protocol):
+    provider_name: str
+
     def complete_json(self, system: str, user: str) -> JsonDict:
         ...
 
 
 class HeuristicLLMProvider:
+    provider_name = "heuristic"
+
     def complete_json(self, system: str, user: str) -> JsonDict:
+        logger.info(
+            "LLM provider=heuristic action=complete_json system_chars=%s user_chars=%s",
+            len(system),
+            len(user),
+        )
         return {"provider": "heuristic", "system": system[:120], "notes": user[:400]}
 
 
 class OpenAILLMProvider:
+    provider_name = "openai"
+
     def __init__(self, model: str | None = None) -> None:
-        from openai import OpenAI
+        if langfuse_configured():
+            try:
+                from langfuse.openai import OpenAI
+
+                self.langfuse_wrapped = True
+            except ImportError:
+                logger.warning("Langfuse OpenAI wrapper unavailable; using plain OpenAI client.")
+                from openai import OpenAI
+
+                self.langfuse_wrapped = False
+        else:
+            from openai import OpenAI
+
+            self.langfuse_wrapped = False
 
         self.client = OpenAI()
         self.model = model or os.getenv("NARRATION_LLM_MODEL", "gpt-4.1")
+        logger.info(
+            "LLM provider=openai selected model=%s langfuse_wrapped=%s",
+            self.model,
+            self.langfuse_wrapped,
+        )
 
     def complete_json(self, system: str, user: str) -> JsonDict:
-        response = self.client.responses.create(
-            model=self.model,
-            input=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            text={"format": {"type": "json_object"}},
+        logger.info(
+            "LLM provider=openai request_start model=%s system_chars=%s user_chars=%s",
+            self.model,
+            len(system),
+            len(user),
+        )
+        try:
+            with langfuse_observation(
+                "openai-complete-json",
+                as_type="generation",
+                input={"system_chars": len(system), "user_chars": len(user)},
+                metadata={"provider": "openai", "response_format": "json_object"},
+                model=self.model,
+            ) as generation:
+                response = self.client.responses.create(
+                    model=self.model,
+                    input=[
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    text={"format": {"type": "json_object"}},
+                )
+                update_langfuse_observation(
+                    generation,
+                    output={"response_id": getattr(response, "id", None), "output_chars": len(response.output_text or "")},
+                )
+        except Exception:
+            logger.exception("LLM provider=openai request_failed model=%s", self.model)
+            raise
+        logger.info(
+            "LLM provider=openai request_complete model=%s response_id=%s output_chars=%s",
+            self.model,
+            getattr(response, "id", None),
+            len(response.output_text or ""),
         )
         return json.loads(response.output_text)
 
 
 def get_llm_provider(prefer_openai: bool = True) -> LLMProvider:
+    if not prefer_openai:
+        logger.info("LLM provider=heuristic selected reason=openai_disabled")
+        return HeuristicLLMProvider()
     if prefer_openai and os.getenv("OPENAI_API_KEY"):
         try:
             return OpenAILLMProvider()
-        except Exception:
+        except Exception as exc:
+            logger.warning("LLM provider=heuristic selected reason=openai_init_failed error=%s", exc)
             return HeuristicLLMProvider()
+    logger.info("LLM provider=heuristic selected reason=no_openai_api_key")
     return HeuristicLLMProvider()
+
+
+def provider_summary(provider: LLMProvider) -> dict[str, str | None]:
+    return {
+        "provider": getattr(provider, "provider_name", provider.__class__.__name__),
+        "model": getattr(provider, "model", None),
+    }
 
 
 class TTSProvider(Protocol):
@@ -90,10 +271,24 @@ class OpenAITTSProvider:
     OPENAI_VOICES = {"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"}
 
     def __init__(self, model: str | None = None) -> None:
-        from openai import OpenAI
+        if langfuse_configured():
+            try:
+                from langfuse.openai import OpenAI
+
+                self.langfuse_wrapped = True
+            except ImportError:
+                logger.warning("Langfuse OpenAI wrapper unavailable for TTS; using plain OpenAI client.")
+                from openai import OpenAI
+
+                self.langfuse_wrapped = False
+        else:
+            from openai import OpenAI
+
+            self.langfuse_wrapped = False
 
         self.client = OpenAI()
         self.model = model or os.getenv("NARRATION_TTS_MODEL", "gpt-4o-mini-tts")
+        logger.info("TTS provider=openai selected model=%s langfuse_wrapped=%s", self.model, self.langfuse_wrapped)
 
     def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
         parts_dir = output_path.parent / f"{output_path.stem}_parts"
@@ -107,12 +302,34 @@ class OpenAITTSProvider:
                 f"Emotion: {passage.emotion.value}. Delivery: {passage.delivery.value}. "
                 f"Pace: {passage.pace}. Intensity: {passage.intensity}/5.\n\n{passage.text}"
             )
-            with self.client.audio.speech.with_streaming_response.create(
+            logger.info(
+                "TTS provider=openai request_start model=%s voice=%s passage_id=%s input_chars=%s",
+                self.model,
+                voice,
+                passage.passage_id,
+                len(prompt),
+            )
+            with langfuse_observation(
+                "openai-tts",
+                as_type="generation",
+                input={"passage_id": passage.passage_id, "input_chars": len(prompt)},
+                metadata={"provider": "openai", "voice": voice, "speaker": passage.speaker},
                 model=self.model,
-                voice=voice,
-                input=prompt,
-            ) as response:
-                response.stream_to_file(part_path)
+            ) as generation:
+                with self.client.audio.speech.with_streaming_response.create(
+                    model=self.model,
+                    voice=voice,
+                    input=prompt,
+                ) as response:
+                    response.stream_to_file(part_path)
+                update_langfuse_observation(generation, output={"path": str(part_path)})
+            logger.info(
+                "TTS provider=openai request_complete model=%s voice=%s passage_id=%s output=%s",
+                self.model,
+                voice,
+                passage.passage_id,
+                part_path,
+            )
             manifest.append(part_manifest_row(passage, voice, part_path))
         manifest_path = output_path.with_suffix(".parts.json")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

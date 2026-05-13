@@ -57,6 +57,14 @@ button:hover {
   border-color: var(--accent-2);
 }
 
+button:disabled,
+select:disabled,
+input:disabled,
+textarea:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
@@ -114,7 +122,7 @@ textarea:focus-visible {
 
 .project-form {
   display: grid;
-  grid-template-columns: 1fr 1fr 42px;
+  grid-template-columns: 1fr 42px;
   gap: 8px;
 }
 
@@ -160,6 +168,52 @@ textarea:focus-visible {
   min-height: 40px;
 }
 
+.busy-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(18, 34, 31, 0.28);
+}
+
+.busy-overlay[hidden] {
+  display: none;
+}
+
+.busy-box {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 300px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+
+.busy-box p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.spinner {
+  width: 34px;
+  height: 34px;
+  border: 4px solid #d9e7e2;
+  border-top-color: var(--accent-2);
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(420px, 1.1fr) minmax(380px, 0.9fr);
@@ -181,9 +235,10 @@ textarea:focus-visible {
 }
 
 .toolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 10px;
-  justify-content: space-between;
+  align-items: start;
   padding: 14px;
   border-bottom: 1px solid var(--line);
   background: #ffffff;
@@ -194,7 +249,7 @@ textarea:focus-visible {
   grid-template-columns: 140px minmax(180px, 1fr);
   gap: 8px;
   min-width: 0;
-  flex: 1;
+  width: 100%;
 }
 
 .toolbar-actions,
@@ -202,6 +257,17 @@ textarea:focus-visible {
   display: flex;
   gap: 8px;
   align-items: center;
+}
+
+.toolbar-actions {
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.toolbar-actions > button,
+.toolbar-actions > select {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 input,
@@ -212,6 +278,17 @@ textarea {
   background: #fff;
   color: var(--ink);
   padding: 8px 10px;
+}
+
+.editor-view {
+  display: none;
+  flex: 1;
+  min-height: 0;
+}
+
+.editor-view.active {
+  display: flex;
+  flex-direction: column;
 }
 
 #book-editor {
@@ -225,6 +302,55 @@ textarea {
   font-family: ui-serif, "Songti SC", "Noto Serif CJK SC", Georgia, serif;
   font-size: 20px;
   line-height: 1.9;
+}
+
+.inline-annotations {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px;
+  background: #fffdfa;
+}
+
+.inline-annotation-item {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent-2);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(18, 34, 31, 0.06);
+}
+
+.annotation-meta-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1fr) minmax(96px, 0.8fr) minmax(118px, 0.9fr) minmax(82px, 0.7fr) 66px 82px;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-annotation-item .ann-text {
+  width: 100%;
+  min-height: 92px;
+  resize: vertical;
+  font-family: ui-serif, "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  font-size: 18px;
+  line-height: 1.8;
+}
+
+.inline-annotation-item .ann-rationale {
+  width: 100%;
+  color: var(--muted);
+}
+
+.empty-note {
+  padding: 16px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
 }
 
 .inspector-band {
@@ -343,6 +469,12 @@ textarea {
   color: var(--danger);
 }
 
+.danger.armed {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
 .character-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -423,6 +555,7 @@ textarea {
   .toolbar-actions,
   .chapter-fields,
   .character-grid,
+  .annotation-meta-row,
   .annotation-grid,
   .cast-grid {
     grid-template-columns: 1fr;

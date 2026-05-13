@@ -12,6 +12,7 @@ dependencies = [
 openai = ["openai>=1.78"]
 epub = ["ebooklib>=0.18", "beautifulsoup4>=4.12"]
 pdf = ["pypdf>=4.3"]
+langfuse = ["langfuse>=3.0"]
 
 [project.scripts]
 audiobook-narrator = "audiobook_narrator.cli:main"
