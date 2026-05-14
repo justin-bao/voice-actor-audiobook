@@ -368,9 +368,11 @@ class ElevenLabsTTSProvider:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         chunks = self._dialogue_chunks(passages, voice_by_speaker)
         manifest = []
+        chunk_paths: list[Path] = []
         for chunk_index, chunk in enumerate(chunks):
             part_path = output_path.parent / f"{output_path.stem}_{chunk_index:03d}.mp3"
             self._stream_dialogue(chunk["inputs"], part_path)
+            chunk_paths.append(part_path)
             manifest.append(
                 {
                     "chunk_index": chunk_index,
@@ -381,9 +383,13 @@ class ElevenLabsTTSProvider:
                     "passages": chunk["manifest"],
                 }
             )
+        # Concatenate all chunks into a single playable file
+        with open(output_path, "wb") as combined:
+            for part_path in chunk_paths:
+                combined.write(part_path.read_bytes())
         manifest_path = output_path.with_suffix(".parts.json")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return manifest_path
+        return output_path
 
     def _dialogue_chunks(
         self, passages: list[Passage], voice_by_speaker: dict[str, str]

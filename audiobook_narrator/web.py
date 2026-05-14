@@ -110,6 +110,8 @@ class NarratorWebApp:
         annotations = []
         annotated_text = ""
         chapter_memory = None
+        audio_manifest = None
+        audio_url = None
         if selected:
             source_path = paths.source / f"{selected}.txt"
             if source_path.exists():
@@ -121,6 +123,11 @@ class NarratorWebApp:
             loaded_chapter_memory = self.store.load_chapter_memory(project_id, selected)
             if loaded_chapter_memory:
                 chapter_memory = loaded_chapter_memory.model_dump(mode="json")
+            manifest_path = paths.audio / f"{selected}.parts.json"
+            audio_path = paths.audio / f"{selected}.mp3"
+            if manifest_path.exists() and audio_path.exists():
+                audio_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                audio_url = f"/api/projects/{project_id}/audio/{selected}"
         memory_path = paths.memory / "story.json"
         cast_path = paths.casts / "voices.json"
         return {
@@ -133,6 +140,8 @@ class NarratorWebApp:
             "annotations": annotations,
             "annotated_text": annotated_text,
             "cast": json.loads(cast_path.read_text(encoding="utf-8")) if cast_path.exists() else None,
+            "audio_manifest": audio_manifest,
+            "audio_url": audio_url,
         }
 
     def save_chapter(self, project_id: str, body: dict) -> dict:
@@ -460,6 +469,9 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                 if parsed.path == "/api/projects":
                     return self.send_json(app.list_projects())
                 if parsed.path.startswith("/api/projects/"):
+                    parts = decoded_path_parts(parsed.path)
+                    if len(parts) == 5 and parts[3] == "audio":
+                        return self.serve_audio_file(parts[2], parts[4])
                     project_id = unquote(parsed.path.split("/")[3])
                     chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
                     return self.send_json(app.project_payload(project_id, chapter_id))
@@ -540,6 +552,41 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def serve_audio_file(self, project_id: str, chapter_id: str) -> None:
+            project_id = app.safe_project_id(project_id)
+            chapter_id = app.safe_chapter_id(chapter_id)
+            audio_path = app.store.paths(project_id).audio / f"{chapter_id}.mp3"
+            if not audio_path.exists():
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_size = audio_path.stat().st_size
+            range_header = self.headers.get("Range", "")
+            range_match = re.match(r"bytes=(\d*)-(\d*)", range_header) if range_header else None
+            if range_match:
+                start = int(range_match.group(1)) if range_match.group(1) else 0
+                end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+                end = min(end, file_size - 1)
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(length))
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with open(audio_path, "rb") as f:
+                    f.seek(start)
+                    self.wfile.write(f.read(length))
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(audio_path.read_bytes())
 
         def log_message(self, format: str, *args: object) -> None:
             return

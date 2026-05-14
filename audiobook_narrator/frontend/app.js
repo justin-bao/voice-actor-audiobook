@@ -9,6 +9,8 @@ const state = {
   annotatedText: "",
   cast: null,
   elevenVoices: [],
+  audioManifest: null,
+  audioUrl: null,
   pendingDeleteChapterId: null,
   pendingDeleteBookId: null,
   pendingClearAnnotationsId: null,
@@ -19,6 +21,11 @@ const state = {
 
 let previewAudio = null;
 let previewingVoiceId = null;
+
+let chapterAudio = null;
+let audioTimings = [];
+let activePassageIndex = -1;
+let userIsSeeking = false;
 
 function playVoicePreview(voiceId) {
   const voice = state.elevenVoices.find((v) => v.voice_id === voiceId);
@@ -52,6 +59,143 @@ function updatePreviewButtons() {
     btn.textContent = isPlaying ? "⏸" : "▶";
     btn.classList.toggle("playing", isPlaying);
   });
+}
+
+function formatTime(seconds) {
+  const s = Math.floor(seconds % 60);
+  const m = Math.floor((seconds || 0) / 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function buildAudioTimings(totalDuration) {
+  const passages = (state.audioManifest || []).flatMap((chunk) => chunk.passages || []);
+  const totalChars = passages.reduce((sum, p) => sum + (p.text_chars || 1), 0);
+  let cumulative = 0;
+  audioTimings = passages.map((p) => {
+    const chars = p.text_chars || 1;
+    const start = (cumulative / totalChars) * totalDuration;
+    cumulative += chars;
+    const end = (cumulative / totalChars) * totalDuration;
+    return { start, end };
+  });
+}
+
+function updateAudioSeek() {
+  const audio = chapterAudio;
+  if (!audio) return;
+  const duration = audio.duration || 0;
+  const current = audio.currentTime || 0;
+  if (!userIsSeeking) {
+    const seekEl = $("audio-seek");
+    if (seekEl) seekEl.value = duration ? Math.round((current / duration) * 10000) : 0;
+  }
+  const timeEl = $("audio-time");
+  if (timeEl) timeEl.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+}
+
+function clearPassageHighlight() {
+  activePassageIndex = -1;
+  document.querySelectorAll(".inline-annotation-item.audio-active").forEach((el) => {
+    el.classList.remove("audio-active");
+  });
+}
+
+function updateActivePassage(currentTime) {
+  const index = audioTimings.findIndex((t) => currentTime >= t.start && currentTime < t.end);
+  if (index === activePassageIndex) return;
+  activePassageIndex = index;
+  document.querySelectorAll(".inline-annotation-item").forEach((el, i) => {
+    el.classList.toggle("audio-active", i === index);
+  });
+  if (index >= 0) {
+    document.querySelector(`.inline-annotation-item[data-index="${index}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function toggleAudioPlay() {
+  if (!chapterAudio) return;
+  const btn = $("audio-play-btn");
+  if (chapterAudio.paused) {
+    chapterAudio.play();
+    if (btn) btn.textContent = "⏸";
+  } else {
+    chapterAudio.pause();
+    if (btn) btn.textContent = "▶";
+  }
+}
+
+function initAudioPlayer() {
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  audioTimings = [];
+  activePassageIndex = -1;
+  userIsSeeking = false;
+
+  chapterAudio = new Audio(state.audioUrl);
+  chapterAudio.preload = "metadata";
+
+  chapterAudio.addEventListener("loadedmetadata", () => {
+    buildAudioTimings(chapterAudio.duration);
+    updateAudioSeek();
+  });
+  chapterAudio.addEventListener("timeupdate", () => {
+    updateAudioSeek();
+    updateActivePassage(chapterAudio.currentTime);
+  });
+  chapterAudio.addEventListener("ended", () => {
+    const btn = $("audio-play-btn");
+    if (btn) btn.textContent = "▶";
+    clearPassageHighlight();
+  });
+
+  const playBtn = $("audio-play-btn");
+  if (playBtn) playBtn.addEventListener("click", toggleAudioPlay);
+
+  const seekEl = $("audio-seek");
+  if (seekEl) {
+    seekEl.addEventListener("mousedown", () => { userIsSeeking = true; });
+    seekEl.addEventListener("touchstart", () => { userIsSeeking = true; });
+    seekEl.addEventListener("mouseup", () => { userIsSeeking = false; });
+    seekEl.addEventListener("touchend", () => { userIsSeeking = false; });
+    seekEl.addEventListener("input", (e) => {
+      const duration = chapterAudio?.duration || 0;
+      if (chapterAudio) chapterAudio.currentTime = (Number(e.target.value) / 10000) * duration;
+    });
+  }
+}
+
+function renderAudioPlayer() {
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  clearPassageHighlight();
+  const section = $("audio-player-section");
+  if (!section) return;
+  if (!state.audioManifest || !state.audioUrl) {
+    section.hidden = true;
+    section.innerHTML = "";
+    return;
+  }
+  const totalPassages = (state.audioManifest || []).reduce((n, c) => n + (c.passages?.length || 0), 0);
+  const chunkCount = state.audioManifest.length;
+  section.hidden = false;
+  section.innerHTML = `
+    <div class="audio-player">
+      <button id="audio-play-btn" class="audio-play-btn" title="Play / pause">▶</button>
+      <div class="audio-progress-wrap">
+        <input id="audio-seek" class="audio-seek" type="range" min="0" max="10000" value="0" step="1" />
+        <div class="audio-player-meta">
+          <span id="audio-time" class="audio-time">0:00 / 0:00</span>
+          <span class="audio-info">${totalPassages} passages · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""}</span>
+        </div>
+      </div>
+    </div>
+  `;
+  initAudioPlayer();
 }
 
 const $ = (id) => document.getElementById(id);
@@ -133,6 +277,8 @@ async function loadProject(projectId, chapterId = null) {
 function renderProject(payload) {
   $("project-meta").textContent = payload.config.title;
   $("project-select").value = payload.config.project_id;
+  state.audioManifest = payload.audio_manifest || null;
+  state.audioUrl = payload.audio_url || null;
   renderToc();
   const chapter = payload.chapters.find((c) => c.chapter_id === payload.selected_chapter_id);
   $("chapter-id").value = payload.selected_chapter_id || "ch01";
@@ -143,6 +289,7 @@ function renderProject(payload) {
   renderCharacters();
   renderAnnotationsPanel();
   renderTranscript();
+  renderAudioPlayer();
   renderCast();
 }
 
@@ -1083,6 +1230,21 @@ function wireEvents() {
       || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
     if (voiceId) playVoicePreview(voiceId);
   });
+  $("inline-annotations").addEventListener("click", (event) => {
+    const tag = event.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+    const item = event.target.closest(".inline-annotation-item");
+    if (!item || !chapterAudio || !audioTimings.length) return;
+    const index = Number(item.dataset.index);
+    const timing = audioTimings[index];
+    if (!timing) return;
+    chapterAudio.currentTime = timing.start;
+    if (chapterAudio.paused) {
+      chapterAudio.play();
+      const btn = $("audio-play-btn");
+      if (btn) btn.textContent = "⏸";
+    }
+  });
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((node) => node.classList.remove("active"));
@@ -1107,6 +1269,14 @@ function wireEvents() {
 
 function clearChapterUi() {
   state.selectedChapterId = null;
+  state.audioManifest = null;
+  state.audioUrl = null;
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  audioTimings = [];
+  activePassageIndex = -1;
   state.chapters = [];
   state.annotations = [];
   state.annotatedText = "";
