@@ -259,7 +259,7 @@ function renderCharacters() {
           <input class="character-aliases" value="${escapeAttr((character.aliases || []).join(", "))}" placeholder="aliases" />
           <input class="character-age" value="${escapeAttr(character.age || "")}" placeholder="age / life stage" />
           <input class="character-gender" value="${escapeAttr(character.gender || "")}" placeholder="gender / presentation" />
-          ${providerVoiceControl(voice?.provider_voice || "", "character-provider-voice")}
+          ${providerVoiceControl(voice?.provider_voice || "", "character-provider-voice", character)}
           <textarea class="character-personality" placeholder="Base personality / overall profile">${escapeHtml(character.personality || "")}</textarea>
           <textarea class="character-voice-notes" placeholder="Voice casting notes">${escapeHtml(character.voice_notes || "")}</textarea>
         </div>
@@ -328,6 +328,7 @@ function renderCast() {
   $("cast-list").innerHTML = Object.values(cast.assignments || {})
     .map((assignment) => {
       const voice = cast.voices?.[assignment.voice_id] || {};
+      const charProfile = state.memory?.characters?.[assignment.character] || null;
       return `
         <article class="item cast-item" data-character="${escapeAttr(assignment.character)}">
           <div class="item-head">
@@ -336,7 +337,7 @@ function renderCast() {
           </div>
           <div class="cast-grid">
             <input class="cast-voice-id" value="${escapeAttr(assignment.voice_id)}" placeholder="voice id" />
-            ${providerVoiceControl(voice.provider_voice || "")}
+            ${providerVoiceControl(voice.provider_voice || "", "cast-provider-voice", charProfile)}
             <textarea class="cast-reason" placeholder="reason">${escapeHtml(assignment.reason || "")}</textarea>
           </div>
         </article>
@@ -349,12 +350,76 @@ function characterCastAssignment(character) {
   return state.cast?.assignments?.[character] || null;
 }
 
-function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-voice") {
+function scoreVoiceForCharacter(voice, character) {
+  if (!character) return 0;
+  let score = 0;
+  const labels = voice.labels || {};
+  const voiceGender = (labels.gender || "").toLowerCase();
+  const charGender = (character.gender || "").toLowerCase();
+  const normalizeGender = (g) =>
+    /female|woman|girl|女/.test(g) ? "female" : /male|man|boy|男/.test(g) ? "male" : "";
+  const vg = normalizeGender(voiceGender);
+  const cg = normalizeGender(charGender);
+  if (vg && cg && vg === cg) score += 10;
+
+  const voiceAge = (labels.age || "").toLowerCase();
+  const charAge = (character.age || "").toLowerCase();
+  if (voiceAge && charAge) {
+    const ageGroups = [
+      [/child|teen|young|youth|adolescent|少年|少女|青少/, "young"],
+      [/middle.aged|adult|grown|中年|成年/, "middle"],
+      [/old|elder|senior|ancient|aged|老年|老/, "old"],
+    ];
+    const classify = (s) => {
+      for (const [re, label] of ageGroups) if (re.test(s)) return label;
+      return "";
+    };
+    if (classify(voiceAge) && classify(voiceAge) === classify(charAge)) score += 5;
+  }
+
+  const stopWords = new Set([
+    "a", "an", "the", "is", "are", "was", "were", "and", "or", "of", "to",
+    "in", "for", "with", "on", "at", "by", "from", "has", "have", "be",
+    "this", "that", "it", "its", "as", "but", "so",
+  ]);
+  const tokenize = (s) =>
+    (s || "")
+      .toLowerCase()
+      .replace(/[^\w\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !stopWords.has(w));
+
+  const voiceTokens = new Set([
+    ...tokenize(labels.gender),
+    ...tokenize(labels.age),
+    ...tokenize(labels.accent),
+    ...tokenize(labels.description),
+    ...tokenize(labels.use_case),
+    ...tokenize(voice.name),
+  ]);
+  const charTokens = [
+    ...tokenize(character.personality),
+    ...tokenize(character.voice_notes),
+    ...tokenize(character.gender),
+    ...tokenize(character.age),
+  ];
+  for (const tok of charTokens) {
+    if (voiceTokens.has(tok)) score += 1;
+  }
+  return score;
+}
+
+function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-voice", character = null) {
   if (!state.elevenVoices.length) {
     return `<input class="${className}" value="${escapeAttr(selectedVoiceId)}" placeholder="provider voice / ElevenLabs voice id" />`;
   }
   const selectedExists = state.elevenVoices.some((voice) => voice.voice_id === selectedVoiceId);
-  const options = state.elevenVoices
+  const sorted = character
+    ? [...state.elevenVoices].sort(
+        (a, b) => scoreVoiceForCharacter(b, character) - scoreVoiceForCharacter(a, character)
+      )
+    : state.elevenVoices;
+  const options = sorted
     .map((voice) => {
       const labels = voice.labels || {};
       const detail = [labels.gender, labels.age, labels.accent].filter(Boolean).join(", ");
