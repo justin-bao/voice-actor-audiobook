@@ -112,6 +112,33 @@ class PartialAnnotationProvider:
         }
 
 
+class IdAnnotationProvider:
+    provider_name = "id-annotation"
+
+    def complete_json(self, system: str, user: str) -> dict:
+        return {
+            "passages": [
+                {
+                    "passage_id": "ch01-0000",
+                    "speaker_name": "Narrator",
+                    "audio_tags": ["[tense]"],
+                    "pace": "slow",
+                    "intensity": 2,
+                    "pause_after_ms": 700,
+                    "performance_note": "Hold the opening tension.",
+                },
+                {
+                    "chunk_id": "chunk_0001",
+                    "character_name": "汪淼",
+                    "audio_tags": ["[whispers]"],
+                    "pace": "medium",
+                    "intensity": 3,
+                    "pause_after_ms": 450,
+                },
+            ]
+        }
+
+
 class PipelineTest(unittest.TestCase):
     def test_split_passages_preserves_dialogue_turns(self) -> None:
         passages = split_passages(SAMPLE)
@@ -315,6 +342,18 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(passages[0].audio_tags, ["[tense]", "[whispers]"])
         self.assertEqual(passages[0].rationale, "Opening narration should feel tense.")
         self.assertIn("Heuristic annotation", passages[1].rationale)
+
+    def test_annotation_accepts_llm_passage_ids_and_speaker_aliases(self) -> None:
+        story_memory = StoryMemory(title="测试书")
+        chunks = ["旁白很紧张。", "“真的吗？”汪淼问。"]
+
+        passages = try_llm_annotation("ch01", chunks, story_memory, IdAnnotationProvider())
+
+        self.assertEqual(len(passages), 2)
+        self.assertEqual(passages[0].audio_tags, ["[tense]"])
+        self.assertEqual(passages[0].rationale, "Hold the opening tension.")
+        self.assertEqual(passages[1].speaker, "汪淼")
+        self.assertNotIn("Heuristic annotation", passages[1].rationale)
 
     def test_elevenlabs_audio_tags_are_normalized_to_allowlist(self) -> None:
         self.assertEqual(

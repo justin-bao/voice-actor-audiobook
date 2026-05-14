@@ -90,13 +90,16 @@ def try_llm_annotation(
     for fallback_index, row in enumerate(rows):
         if not isinstance(row, dict):
             continue
-        raw_index = row.get("chunk_index", row.get("index", fallback_index))
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError):
+        index = annotation_row_index(row, fallback_index, len(chunks))
+        if index is None:
+            logger.warning(
+                "LLM annotation row rejected chapter=%s reason=bad_index fallback_index=%s keys=%s",
+                chapter_id,
+                fallback_index,
+                sorted(row.keys()),
+            )
             continue
-        if 0 <= index < len(chunks):
-            by_index[index] = row
+        by_index[index] = row
     passages: list[Passage] = []
     llm_count = 0
     for index, chunk in enumerate(chunks):
@@ -143,15 +146,65 @@ def passage_from_llm_row(
         chapter_id=chapter_id,
         index=index,
         text=text,
-        speaker=str(row.get("speaker") or "Narrator"),
+        speaker=normalize_speaker(row),
         emotion=emotion,
         delivery=delivery,
         pace=normalize_pace(row.get("pace")),
         intensity=normalize_intensity(row.get("intensity")),
         pause_after_ms=normalize_pause(row.get("pause_after_ms")),
         audio_tags=audio_tags,
-        rationale=str(row.get("rationale") or "AI narration direction based on story context."),
+        rationale=str(
+            row.get("rationale")
+            or row.get("performance_note")
+            or row.get("note")
+            or "AI narration direction based on story context."
+        ),
     )
+
+
+def annotation_row_index(row: dict, fallback_index: int, chunk_count: int) -> int | None:
+    raw_index = first_present(row, "chunk_index", "index", "chunk", "chunk_id", "passage_id", "id")
+    if raw_index is None:
+        return fallback_index if fallback_index < chunk_count else None
+    index = parse_annotation_index(raw_index)
+    if index is None:
+        return fallback_index if fallback_index < chunk_count else None
+    if 0 <= index < chunk_count:
+        return index
+    if 1 <= index <= chunk_count:
+        return index - 1
+    return fallback_index if fallback_index < chunk_count else None
+
+
+def parse_annotation_index(value: object) -> int | None:
+    if isinstance(value, int):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    matches = re.findall(r"\d+", text)
+    if not matches:
+        return None
+    return int(matches[-1])
+
+
+def first_present(row: dict, *keys: str) -> object | None:
+    for key in keys:
+        if key in row and row[key] not in {None, ""}:
+            return row[key]
+    return None
+
+
+def normalize_speaker(row: dict) -> str:
+    speaker = str(
+        first_present(row, "speaker", "speaker_name", "character", "character_name", "voice")
+        or "Narrator"
+    ).strip()
+    return speaker or "Narrator"
 
 
 def emotion_from_audio_tags(audio_tags: list[str]) -> Emotion:

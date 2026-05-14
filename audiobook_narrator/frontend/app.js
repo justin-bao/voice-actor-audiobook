@@ -11,7 +11,10 @@ const state = {
   elevenVoices: [],
   pendingDeleteChapterId: null,
   pendingDeleteBookId: null,
+  pendingClearAnnotationsId: null,
   loadingElevenVoices: false,
+  autoSaveTimer: null,
+  autoSaving: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -43,6 +46,12 @@ function setBusy(isBusy, title = "Working", detail = "Waiting for the model...")
   });
 }
 
+function scheduleAutoSave() {
+  if (!state.project || !state.selectedChapterId) return;
+  clearTimeout(state.autoSaveTimer);
+  state.autoSaveTimer = setTimeout(() => saveChapterPage({ silent: true }), 1200);
+}
+
 async function refreshProjects() {
   const payload = await api("/api/projects");
   state.projects = payload.projects || [];
@@ -64,6 +73,7 @@ async function loadProject(projectId, chapterId = null) {
   if (!projectId) return;
   resetDeleteButton();
   resetBookDeleteButton();
+  resetClearButton();
   const query = chapterId ? `?chapter=${encodeURIComponent(chapterId)}` : "";
   const payload = await api(`/api/projects/${encodeURIComponent(projectId)}${query}`);
   state.project = payload.config;
@@ -121,6 +131,10 @@ function renderChapterHydration() {
   document.querySelector(".workspace").classList.toggle("no-chapter", !hasChapter);
   document.querySelector(".editor-band").classList.toggle("no-chapter", !hasChapter);
   $("empty-editor").classList.toggle("active", !hasChapter);
+}
+
+function setInspectorOpen(isOpen) {
+  document.querySelector(".workspace").classList.toggle("inspector-collapsed", !isOpen);
 }
 
 function renderMemory() {
@@ -215,9 +229,7 @@ function renderCharacters() {
 }
 
 function renderAnnotationsPanel() {
-  $("annotations-list").innerHTML = state.annotations.length
-    ? `<div class="empty-note">Annotations are editable directly in the transcript. Use Save Transcript to persist changes.</div>`
-    : `<div class="empty-note">Run Annotate to add editable speaker, emotion, delivery, and pacing controls to the transcript.</div>`;
+  return;
 }
 
 function renderTranscript() {
@@ -349,29 +361,71 @@ function selectHtml(className, options, selected) {
     .join("")}</select>`;
 }
 
-async function saveChapter() {
+async function saveChapterTranscript({ reload = true } = {}) {
   if (!state.project || !state.selectedChapterId) return;
+  const chapterId = $("chapter-id").value.trim();
+  const title = $("chapter-title").value.trim();
   if (state.annotations.length) {
     const annotations = collectAnnotations();
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapters`, {
+      method: "POST",
+      body: JSON.stringify({
+        chapter_id: chapterId,
+        title,
+        text: annotations.map((row) => row.text || "").join("\n\n"),
+      }),
+    });
     await saveAnnotationsPayload(annotations);
     await saveAnnotatedTextPayload(buildEmbeddedAnnotationText(annotations));
     state.annotations = annotations;
     state.annotatedText = buildEmbeddedAnnotationText(annotations);
+    state.selectedChapterId = chapterId;
     renderAnnotationsPanel();
     renderTranscript();
-    setStatus("Transcript annotations saved");
+    if (reload) await loadProject(state.project.project_id, chapterId);
     return;
   }
   await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapters`, {
     method: "POST",
     body: JSON.stringify({
-      chapter_id: $("chapter-id").value.trim(),
-      title: $("chapter-title").value.trim(),
+      chapter_id: chapterId,
+      title,
       text: $("book-editor").value,
     }),
   });
-  await loadProject(state.project.project_id, $("chapter-id").value.trim());
-  setStatus("Transcript saved");
+  state.selectedChapterId = chapterId;
+  if (reload) await loadProject(state.project.project_id, chapterId);
+}
+
+async function saveChapterPage({ silent = false } = {}) {
+  if (!state.project || !state.selectedChapterId || state.autoSaving) return;
+  state.autoSaving = true;
+  try {
+    await saveChapterTranscript({ reload: false });
+    const memory = collectMemory();
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/memory`, {
+      method: "POST",
+      body: JSON.stringify(memory),
+    });
+    state.memory = memory;
+    if (state.selectedChapterId) {
+      const chapterMemory = collectChapterMemory();
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapter-memory/${encodeURIComponent(state.selectedChapterId)}`, {
+        method: "POST",
+        body: JSON.stringify(chapterMemory),
+      });
+      state.chapterMemory = chapterMemory;
+    }
+    await saveCharacterVoiceAssignments();
+    if (!silent) {
+      await loadProject(state.project.project_id, state.selectedChapterId);
+      setStatus("Chapter page saved");
+    }
+  } catch (error) {
+    setStatus(`Save failed: ${error.message}`);
+  } finally {
+    state.autoSaving = false;
+  }
 }
 
 async function saveAnnotationsPayload(annotations) {
@@ -505,7 +559,15 @@ function collectAnnotations() {
 
 async function resetAnnotations() {
   if (!state.project || !state.selectedChapterId) return;
-  setStatus(`Resetting annotations for ${state.selectedChapterId}...`);
+  const button = $("reset-annotations");
+  if (state.pendingClearAnnotationsId !== state.selectedChapterId) {
+    state.pendingClearAnnotationsId = state.selectedChapterId;
+    button.textContent = "Confirm Clear";
+    button.classList.add("armed");
+    setStatus(`Click Confirm Clear to remove all annotations for ${state.selectedChapterId}`);
+    return;
+  }
+  setStatus(`Clearing annotations for ${state.selectedChapterId}...`);
   try {
     await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/reset-annotations/${encodeURIComponent(state.selectedChapterId)}`, {
       method: "POST",
@@ -513,11 +575,14 @@ async function resetAnnotations() {
     });
     state.annotations = [];
     state.annotatedText = "";
+    state.pendingClearAnnotationsId = null;
+    button.textContent = "Clear";
+    button.classList.remove("armed");
     renderAnnotationsPanel();
     renderTranscript();
-    setStatus("Chapter annotations reset");
+    setStatus("Chapter annotations cleared");
   } catch (error) {
-    setStatus(`Reset failed: ${error.message}`);
+    setStatus(`Clear failed: ${error.message}`);
   }
 }
 
@@ -658,7 +723,7 @@ async function runStep(step) {
       body: JSON.stringify({
         step,
         chapter_id: state.selectedChapterId,
-        backend: $("tts-backend").value,
+        backend: "elevenlabs",
       }),
     });
     await loadProject(state.project.project_id, state.selectedChapterId);
@@ -863,18 +928,19 @@ function wireEvents() {
     ids.splice(ids.indexOf(targetId), 0, draggedId);
     await reorderChapters(ids);
   });
-  $("save-chapter").addEventListener("click", saveChapter);
+  $("save-chapter").addEventListener("click", () => saveChapterPage());
   $("reset-annotations").addEventListener("click", resetAnnotations);
   $("delete-book").addEventListener("click", deleteCurrentBook);
   $("save-memory").addEventListener("click", saveMemory);
   $("save-characters").addEventListener("click", saveCharacterProfiles);
-  $("save-annotations").addEventListener("click", saveChapter);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
   $("run-analyze").addEventListener("click", () => runStep("analyze"));
   $("run-annotate").addEventListener("click", () => runStep("annotate"));
   $("run-cast").addEventListener("click", () => runStep("cast"));
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
+  $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
+  $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
   $("import-file").addEventListener("click", () => $("file-input").click());
   $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
   $("file-input").addEventListener("change", (event) => importFiles(event.target.files));
@@ -905,6 +971,18 @@ function wireEvents() {
       $(`${tab.dataset.tab}-panel`).classList.add("active");
     });
   });
+  [
+    "book-editor",
+    "chapter-id",
+    "chapter-title",
+    "inline-annotations",
+    "memory-panel",
+    "characters-panel",
+    "voices-panel",
+  ].forEach((id) => {
+    $(id)?.addEventListener("input", scheduleAutoSave);
+    $(id)?.addEventListener("change", scheduleAutoSave);
+  });
 }
 
 function clearChapterUi() {
@@ -929,6 +1007,14 @@ function resetDeleteButton() {
     button.textContent = "×";
     button.classList.remove("armed");
   });
+}
+
+function resetClearButton() {
+  state.pendingClearAnnotationsId = null;
+  const button = $("reset-annotations");
+  if (!button) return;
+  button.textContent = "Clear";
+  button.classList.remove("armed");
 }
 
 function resetBookDeleteButton() {

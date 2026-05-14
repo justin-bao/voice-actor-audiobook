@@ -310,6 +310,14 @@ textarea:focus-visible {
   height: 100vh;
 }
 
+.workspace.inspector-collapsed {
+  grid-template-columns: 1fr 0;
+}
+
+.workspace.inspector-collapsed .inspector-band {
+  display: none;
+}
+
 .workspace.no-chapter {
   grid-template-columns: 1fr;
 }
@@ -334,9 +342,9 @@ textarea:focus-visible {
 
 .toolbar {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
   gap: 10px;
-  align-items: start;
+  align-items: end;
   padding: 14px;
   border-bottom: 1px solid var(--line);
   background: #ffffff;
@@ -380,6 +388,15 @@ textarea:focus-visible {
   width: 100%;
 }
 
+.chapter-fields label {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
 .toolbar-actions,
 .cluster {
   display: flex;
@@ -390,12 +407,17 @@ textarea:focus-visible {
 .toolbar-actions {
   flex-wrap: wrap;
   align-items: stretch;
+  justify-content: flex-start;
 }
 
 .toolbar-actions > button,
 .toolbar-actions > select {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.toolbar-details {
+  margin-left: auto;
 }
 
 input,
@@ -491,9 +513,19 @@ textarea {
   background: #eef3ed;
 }
 
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 0 12px 0 18px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+}
+
 .tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 0;
   border-bottom: 1px solid var(--line);
   background: #fff;
@@ -653,6 +685,12 @@ textarea {
 }
 
 .danger.armed {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+button.armed {
   background: var(--danger);
   border-color: var(--danger);
   color: #fff;

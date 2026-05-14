@@ -52,7 +52,7 @@
         <div class="status" id="status">Ready</div>
       </aside>
 
-      <main class="workspace">
+      <main class="workspace inspector-collapsed">
         <section class="editor-band">
           <div id="empty-editor" class="empty-editor">
             <h2>Select a chapter</h2>
@@ -60,21 +60,22 @@
           </div>
           <div class="toolbar">
             <div class="chapter-fields">
-              <input id="chapter-id" placeholder="chapter-id" />
-              <input id="chapter-title" placeholder="Chapter title" />
+              <label>
+                <span>Chapter ID</span>
+                <input id="chapter-id" placeholder="chapter-id" />
+              </label>
+              <label>
+                <span>Chapter Title</span>
+                <input id="chapter-title" placeholder="Chapter title" />
+              </label>
             </div>
             <div class="toolbar-actions">
               <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
               <button id="import-file" title="Import one or more chapters">⇧ Import</button>
-              <button id="save-chapter" title="Save transcript text and annotations">Save Transcript</button>
-              <button id="reset-annotations" title="Remove annotations for this chapter">Reset Tags</button>
+              <button id="reset-annotations" title="Clear all annotations for this chapter">Clear</button>
               <button id="synthesize" title="Generate narration">▶ Generate</button>
-              <select id="tts-backend" title="TTS backend">
-                <option value="script">Script</option>
-                <option value="elevenlabs">ElevenLabs</option>
-                <option value="openai">OpenAI</option>
-                <option value="macos_say">macOS Say</option>
-              </select>
+              <button id="save-chapter" class="toolbar-save" title="Save chapter page">💾 Save</button>
+              <button id="toggle-inspector" class="toolbar-details" title="Open memory, character, and voice drawer">☰ Details</button>
             </div>
           </div>
           <div id="transcript-wrap" class="editor-view active">
@@ -85,10 +86,13 @@
         </section>
 
         <section class="inspector-band">
+          <div class="drawer-head">
+            <strong>Details</strong>
+            <button id="close-inspector" class="icon-button" title="Collapse drawer">×</button>
+          </div>
           <nav class="tabs" aria-label="Inspector views">
             <button class="tab active" data-tab="memory">Memory</button>
             <button class="tab" data-tab="characters">Characters</button>
-            <button class="tab" data-tab="annotations">Annotations</button>
             <button class="tab" data-tab="voices">Voices</button>
           </nav>
 
@@ -141,14 +145,6 @@
             <div id="characters-list" class="item-list"></div>
           </div>
 
-          <div id="annotations-panel" class="panel">
-            <div class="panel-heading">
-              <h2>Performance Annotations</h2>
-              <button id="save-annotations" title="Save annotations">Save</button>
-            </div>
-            <div id="annotations-list" class="item-list annotation-list"></div>
-          </div>
-
           <div id="voices-panel" class="panel">
             <div class="panel-heading">
               <h2>Voices</h2>
@@ -179,6 +175,6 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=20260513-auto-cast"></script>
+    <script src="/app.js?v=20260514-chapter-page"></script>
   </body>
 </html>
