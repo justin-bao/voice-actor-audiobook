@@ -3,7 +3,7 @@ import requests
 with open('004_第一章_SSML.txt', 'r', encoding='utf-8') as f:
     ssml_content = f.read()
 
-API_KEY = "sk_9cf69ab84a2cc0e67cbd0b9788bcd6133a157de20d52d5c5"
+API_KEY = ""  # fill in
 VOICE_ID = "DowyQ68vDpgFYdWVGjc3"  # Jason Chen narrator
 
 # Split into 3-4 chunks (due to 10k char limit)
