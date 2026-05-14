@@ -76,6 +76,9 @@ class ChapterCharacterMemory(BaseModel):
     name: str
     role_in_chapter: str = ""
     personality_at_this_point: str = ""
+    emotional_state: str = ""
+    vocal_quality: str = ""
+    key_moments: list[str] = Field(default_factory=list)
     changes: str = ""
     evidence: list[str] = Field(default_factory=list)
 
@@ -85,6 +88,8 @@ class ChapterMemory(BaseModel):
     title: str = ""
     plot_summary: str = ""
     current_state: str = ""
+    atmosphere: str = ""
+    narrative_arc: str = ""
     themes: list[str] = Field(default_factory=list)
     pronunciation_notes: dict[str, str] = Field(default_factory=dict)
     character_changes: dict[str, ChapterCharacterMemory] = Field(default_factory=dict)

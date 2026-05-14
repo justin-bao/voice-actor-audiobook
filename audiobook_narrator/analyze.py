@@ -11,8 +11,9 @@ from audiobook_narrator.models import (
     ChapterMemory,
     StoryMemory,
 )
+from audiobook_narrator.annotate import annotate_chapter
 from audiobook_narrator.providers import LLMProvider
-from audiobook_narrator.storage import ProjectStore
+from audiobook_narrator.storage import ProjectStore, list_source_chapter_paths
 
 
 CHINESE_NAME = re.compile(r"[\u4e00-\u9fff]{2,4}")
@@ -22,40 +23,60 @@ GENERIC_PLOT_SUMMARY = (
 )
 
 ANALYZE_SYSTEM_PROMPT = """You maintain structured memory for Mandarin Chinese audiobook narration.
-Extract only evidence-supported story facts from the chapter. Return strict JSON with:
+Analyze the chapter and return strict JSON with two clearly separated sections.
+
+SEMANTIC — stable facts to merge into running character biographies and world knowledge:
+  character_updates: stable attributes for voice casting and story continuity
+  pronunciation_notes: how to read specific terms
+  themes: short thematic labels for the overall book
+
+EPISODIC — transient state for THIS chapter only, used directly by the audiobook director:
+  summary: factual plot summary focused on cause and effect
+  chapter_atmosphere: overall tone, mood, and pacing of this chapter
+  narrative_arc: how the chapter unfolds as a reading experience (opening energy, turning points, emotional close)
+  current_state: where the story stands at this chapter's end
+  character_states: each character's emotional arc and vocal performance direction for this chapter
+
+Return strict JSON:
 {
-  "summary": "chapter plot summary focused on causality and stakes",
-  "current_state": "where the story/scene stands at chapter end",
+  "summary": "factual plot summary",
+  "chapter_atmosphere": "overall tone and mood for this chapter",
+  "narrative_arc": "how the chapter flows: opening, turning points, close",
+  "current_state": "where the story stands at chapter end",
   "themes": ["short theme labels"],
-  "pronunciation_notes": {"term": "how to read it or why it matters"},
-  "characters": [
+  "pronunciation_notes": {"term": "how to read it"},
+  "character_updates": [
     {
       "name": "canonical display name",
-      "aliases": ["other names"],
-      "age": "known or inferred broad age such as child, teen, adult, elderly",
-      "gender": "known or inferred gender/presentation if useful for voice casting",
-      "personality": "stable overall/base personality profile for voice casting",
-      "role_in_plot": "aggregate role in the story",
+      "aliases": ["other names used"],
+      "age": "known or inferred broad age",
+      "gender": "known or inferred gender/presentation",
+      "personality_baseline": "stable personality for voice casting — only update if new evidence changes the established baseline",
+      "role_in_plot": "aggregate narrative function",
       "relationships": {"other character": "relationship"},
       "voice_notes": "stable ElevenLabs voice casting guidance"
     }
   ],
-  "character_changes": [
+  "character_states": [
     {
       "name": "canonical display name",
-      "personality_at_this_point": "how they seem during this chapter",
-      "changes": "what changes for this character by chapter end",
-      "evidence": ["short supporting text detail"]
+      "emotional_state": "how this character feels during this chapter",
+      "vocal_quality": "how their voice sounds this chapter: commanding, broken, guarded, tender, etc.",
+      "arc_this_chapter": "what shifts for them by this chapter's end",
+      "key_moments": ["dramatic beat or emotional peak worth flagging for the director"]
     }
   ]
 }
-Do not use placeholders like Unknown when the chapter gives evidence."""
+Only include evidence-supported facts. Do not use placeholders like Unknown."""
 
 ANALYZE_USER_TEMPLATE = """Project title: {title}
 Chapter id: {chapter_id}
 
-Existing memory:
+Running book memory (accumulated from prior chapters):
 {memory_json}
+
+Previous chapter state (emotional and narrative handoff into this chapter):
+{prev_chapter_memory_json}
 
 Chapter text:
 {text}"""
@@ -66,6 +87,7 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
     memory = store.load_memory(project_id)
     provider_is_heuristic = provider.__class__.__name__ == "HeuristicLLMProvider"
     analyzed_chapters: list[str] = []
+    prev_chapter_memory: ChapterMemory | None = None
     for source_path in source_chapter_paths(paths.source):
         chapter_id = source_path.stem
         text = source_path.read_text(encoding="utf-8")
@@ -73,7 +95,7 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
         if provider_is_heuristic and chapter_id in memory.chapter_summaries:
             analysis = {"summary": memory.chapter_summaries[chapter_id]}
         else:
-            analysis = analyze_chapter(chapter_id, text, memory, provider)
+            analysis = analyze_chapter(chapter_id, text, memory, provider, prev_chapter_memory=prev_chapter_memory)
         use_heuristic_characters = provider_is_heuristic or not has_llm_character_rows(analysis)
         chapter_memory = chapter_memory_from_analysis(
             chapter_id,
@@ -88,7 +110,7 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
         merge_pronunciation_notes(memory, chapter_memory.pronunciation_notes)
         merge_themes(memory, analysis.get("themes", []))
         merge_pronunciation_notes(memory, analysis.get("pronunciation_notes", {}))
-        merge_characters(memory, chapter_id, analysis.get("characters", []))
+        merge_characters(memory, chapter_id, analysis.get("character_updates", analysis.get("characters", [])))
         merge_book_characters_from_chapter(memory, chapter_memory)
         if use_heuristic_characters:
             for name in discover_character_names(text):
@@ -104,6 +126,13 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
                 )
         if analysis.get("current_state"):
             memory.current_state = chapter_memory.current_state
+        passages = annotate_chapter(
+            chapter_id, text, memory, provider,
+            chapter_memory=chapter_memory,
+            prev_chapter_memory=prev_chapter_memory,
+        )
+        store.write_jsonl(paths.annotations / f"{chapter_id}.jsonl", passages)
+        prev_chapter_memory = chapter_memory
     if not memory.plot_summary or memory.plot_summary == GENERIC_PLOT_SUMMARY or not provider_is_heuristic:
         memory.plot_summary = build_plot_summary(memory)
     if not memory.current_state:
@@ -113,30 +142,25 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
     return memory
 
 
-def source_chapter_paths(source_dir: Path) -> list[Path]:
-    paths = [path for path in source_dir.glob("*.txt") if not path.name.endswith(".annotated.txt")]
-
-    def sort_key(path: Path) -> tuple[int, str]:
-        manifest_path = source_dir / f"{path.stem}.manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                return int(manifest.get("order", 0)), path.name
-            except Exception:
-                return 0, path.name
-        return 0, path.name
-
-    return sorted(paths, key=sort_key)
+source_chapter_paths = list_source_chapter_paths
 
 
-def analyze_chapter(chapter_id: str, text: str, memory: StoryMemory, provider: LLMProvider) -> dict:
+def analyze_chapter(
+    chapter_id: str,
+    text: str,
+    memory: StoryMemory,
+    provider: LLMProvider,
+    prev_chapter_memory: ChapterMemory | None = None,
+) -> dict:
     if provider.__class__.__name__ != "HeuristicLLMProvider":
+        prev_json = prev_chapter_memory.model_dump_json(exclude_none=True) if prev_chapter_memory else "{}"
         payload = provider.complete_json(
             ANALYZE_SYSTEM_PROMPT,
             ANALYZE_USER_TEMPLATE.format(
                 title=memory.title,
                 chapter_id=chapter_id,
                 memory_json=memory.model_dump_json(exclude_none=True),
+                prev_chapter_memory_json=prev_json,
                 text=text[:12000],
             ),
         )
@@ -155,15 +179,21 @@ def chapter_memory_from_analysis(
 ) -> ChapterMemory:
     summary = str(analysis.get("summary", "")).strip() or heuristic_summary(text)
     current_state = str(analysis.get("current_state", "")).strip()
+    atmosphere = str(analysis.get("chapter_atmosphere", "")).strip()
+    narrative_arc = str(analysis.get("narrative_arc", "")).strip()
     chapter_memory = ChapterMemory(
         chapter_id=chapter_id,
         title=title,
         plot_summary=summary,
         current_state=current_state,
+        atmosphere=atmosphere,
+        narrative_arc=narrative_arc,
     )
     merge_chapter_themes(chapter_memory, analysis.get("themes", []))
     merge_chapter_pronunciation_notes(chapter_memory, analysis.get("pronunciation_notes", {}))
-    merge_chapter_character_changes(chapter_memory, analysis.get("character_changes", []))
+    merge_chapter_character_states(chapter_memory, analysis.get("character_states", []))
+    if not chapter_memory.character_changes:
+        merge_chapter_character_changes(chapter_memory, analysis.get("character_changes", []))
     if not chapter_memory.character_changes:
         merge_chapter_character_changes(chapter_memory, analysis.get("characters", []))
     if use_heuristic_characters:
@@ -180,7 +210,12 @@ def chapter_memory_from_analysis(
 
 
 def has_llm_character_rows(analysis: dict) -> bool:
-    return bool(valid_character_rows(analysis.get("characters")) or valid_character_rows(analysis.get("character_changes")))
+    return bool(
+        valid_character_rows(analysis.get("character_updates"))
+        or valid_character_rows(analysis.get("character_states"))
+        or valid_character_rows(analysis.get("characters"))
+        or valid_character_rows(analysis.get("character_changes"))
+    )
 
 
 def valid_character_rows(rows: object) -> list[dict]:
@@ -229,6 +264,33 @@ def merge_chapter_character_changes(chapter_memory: ChapterMemory, rows: object)
             evidence=[str(item).strip() for item in row.get("evidence", []) if str(item).strip()]
             if isinstance(row.get("evidence", []), list)
             else [],
+        )
+
+
+def merge_chapter_character_states(chapter_memory: ChapterMemory, rows: object) -> None:
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = clean_name(str(row.get("name", "")).strip())
+        if not name or _looks_like_common_phrase(name):
+            continue
+        emotional_state = str(row.get("emotional_state", "")).strip()
+        vocal_quality = str(row.get("vocal_quality", "")).strip()
+        key_moments_raw = row.get("key_moments", [])
+        key_moments = (
+            [str(m).strip() for m in key_moments_raw if str(m).strip()]
+            if isinstance(key_moments_raw, list)
+            else []
+        )
+        chapter_memory.character_changes[name] = ChapterCharacterMemory(
+            name=name,
+            personality_at_this_point=emotional_state,
+            emotional_state=emotional_state,
+            vocal_quality=vocal_quality,
+            changes=str(row.get("arc_this_chapter", "")).strip(),
+            key_moments=key_moments,
         )
 
 
@@ -304,7 +366,8 @@ def merge_character(memory: StoryMemory, chapter_id: str, row: dict) -> None:
             if value and value not in existing.aliases:
                 existing.aliases.append(value)
     for field in ["age", "gender", "personality", "role_in_plot", "voice_notes"]:
-        value = str(row.get(field, "")).strip()
+        raw = row.get(field) or (row.get("personality_baseline") if field == "personality" else None)
+        value = str(raw or "").strip()
         current = getattr(existing, field)
         if value and (not current or current == UNKNOWN_PERSONALITY or provider_placeholder(current)):
             setattr(existing, field, value)
