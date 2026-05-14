@@ -244,16 +244,18 @@ function renderTranscript() {
 function inlineAnnotationHtml(row, index) {
   return `
     <article class="inline-annotation-item" data-index="${index}">
-      <div class="annotation-meta-row">
+      <div class="annotation-header">
         <input class="ann-speaker" value="${escapeAttr(row.speaker || "Narrator")}" placeholder="speaker" />
         ${selectHtml("ann-emotion", emotions, row.emotion || "neutral")}
         ${selectHtml("ann-delivery", deliveries, row.delivery || "matter-of-fact")}
         ${selectHtml("ann-pace", paces, row.pace || "medium")}
-        <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity" />
-        <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" title="pause ms" />
+        <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity 1–5" />
       </div>
-      <input class="ann-tags" value="${escapeAttr((row.audio_tags || []).join(", "))}" placeholder="[tense], [whispers]" />
-      <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
+      <div class="annotation-script">
+        <input class="ann-tags" value="${escapeAttr((row.audio_tags || []).join(", "))}" placeholder="[tense], [whispers]" />
+        <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
+        <div class="script-pause">⏸ <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" /> ms</div>
+      </div>
       <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
     </article>
   `;
