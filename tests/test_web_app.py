@@ -6,7 +6,7 @@ from base64 import b64encode
 from pathlib import Path
 from urllib.parse import quote
 
-from audiobook_narrator.models import Passage
+from audiobook_narrator.models import ChapterMemory, Passage
 from audiobook_narrator.web import NarratorWebApp, decoded_path_parts, title_to_project_id
 
 
@@ -53,6 +53,43 @@ class WebAppFileActionsTest(unittest.TestCase):
             )
             self.assertIn("memory", result)
 
+    def test_project_payload_does_not_auto_select_chapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            app.create_project({"title": "Book"})
+            app.save_chapter("book", {"chapter_id": "ch01", "title": "One", "text": "Hello"})
+
+            payload = app.project_payload("book")
+
+            self.assertIsNone(payload["selected_chapter_id"])
+            self.assertEqual(payload["source_text"], "")
+
+    def test_rename_project_updates_config_and_memory_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            app.create_project({"title": "Old"})
+
+            result = app.rename_project("old", {"title": "New"})
+
+            self.assertEqual(result["config"]["title"], "New")
+            self.assertEqual(app.store.load_config("old").title, "New")
+            self.assertEqual(app.store.load_memory("old").title, "New")
+
+    def test_reorder_chapters_persists_manifest_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            app.create_project({"title": "Book"})
+            app.save_chapter("book", {"chapter_id": "ch01", "title": "One", "text": "1"})
+            app.save_chapter("book", {"chapter_id": "ch02", "title": "Two", "text": "2"})
+
+            result = app.reorder_chapters("book", {"chapter_ids": ["ch02", "ch01"]})
+
+            self.assertEqual([row["chapter_id"] for row in result["chapters"]], ["ch02", "ch01"])
+            self.assertEqual(
+                [row["chapter_id"] for row in app.project_payload("book")["chapters"]],
+                ["ch02", "ch01"],
+            )
+
     def test_title_to_project_id_has_safe_fallback(self) -> None:
         self.assertEqual(title_to_project_id("///"), "book")
 
@@ -68,6 +105,10 @@ class WebAppFileActionsTest(unittest.TestCase):
                 {"annotations": [Passage(passage_id="p1", chapter_id="ch01", index=0, text="Hello").model_dump()]},
             )
             app.save_annotated_text("book", "ch01", {"text": "[[speaker=Narrator]]\nHello\n"})
+            store.save_chapter_memory(
+                "book",
+                ChapterMemory(chapter_id="ch01", title="Chapter", plot_summary="Chapter memory"),
+            )
 
             result = app.reset_annotations("book", "ch01")
             paths = store.paths("book")
@@ -76,6 +117,7 @@ class WebAppFileActionsTest(unittest.TestCase):
             self.assertFalse((paths.annotations / "ch01.jsonl").exists())
             self.assertFalse((paths.source / "ch01.annotated.txt").exists())
             self.assertTrue((paths.source / "ch01.txt").exists())
+            self.assertTrue((paths.memory / "chapters" / "ch01.json").exists())
 
     def test_delete_chapter_removes_chapter_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +126,10 @@ class WebAppFileActionsTest(unittest.TestCase):
             store.create_project("book", "Book")
             app.save_chapter("book", {"chapter_id": "ch01", "title": "Chapter", "text": "Hello"})
             app.save_annotated_text("book", "ch01", {"text": "annotated"})
+            store.save_chapter_memory(
+                "book",
+                ChapterMemory(chapter_id="ch01", title="Chapter", plot_summary="Chapter memory"),
+            )
 
             result = app.delete_chapter("book", "ch01")
             paths = store.paths("book")
@@ -93,6 +139,51 @@ class WebAppFileActionsTest(unittest.TestCase):
             self.assertFalse((paths.source / "ch01.txt").exists())
             self.assertFalse((paths.source / "ch01.manifest.json").exists())
             self.assertFalse((paths.source / "ch01.annotated.txt").exists())
+            self.assertFalse((paths.memory / "chapters" / "ch01.json").exists())
+
+    def test_project_payload_includes_selected_chapter_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            store = app.store
+            store.create_project("book", "Book")
+            app.save_chapter("book", {"chapter_id": "ch01", "title": "Chapter", "text": "Hello"})
+            store.save_chapter_memory(
+                "book",
+                ChapterMemory(chapter_id="ch01", title="Chapter", plot_summary="Chapter memory"),
+            )
+
+            payload = app.project_payload("book", "ch01")
+
+            self.assertEqual(payload["chapter_memory"]["plot_summary"], "Chapter memory")
+
+    def test_save_chapter_memory_persists_editable_chapter_understanding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            app.create_project({"title": "Book"})
+
+            result = app.save_chapter_memory(
+                "book",
+                "ch01",
+                {
+                    "title": "Chapter",
+                    "plot_summary": "Chapter-only plot",
+                    "current_state": "Chapter end state",
+                    "themes": ["pressure"],
+                    "character_changes": {
+                        "汪淼": {
+                            "name": "汪淼",
+                            "role_in_chapter": "Asks questions.",
+                            "personality_at_this_point": "Persistent.",
+                            "changes": "Gets more suspicious.",
+                        }
+                    },
+                },
+            )
+
+            self.assertTrue(result["ok"])
+            loaded = app.store.load_chapter_memory("book", "ch01")
+            self.assertEqual(loaded.plot_summary, "Chapter-only plot")
+            self.assertEqual(loaded.character_changes["汪淼"].changes, "Gets more suspicious.")
 
     def test_delete_project_removes_entire_book(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

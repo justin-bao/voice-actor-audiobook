@@ -1,12 +1,39 @@
 from __future__ import annotations
 
+import logging
 import re
 
+from audiobook_narrator.analyze import source_chapter_paths
+from audiobook_narrator.audio_tags import allowed_audio_tags_prompt, audio_tags_for_passage, normalize_audio_tags
 from audiobook_narrator.models import Delivery, Emotion, Passage, StoryMemory
 from audiobook_narrator.providers import LLMProvider
 from audiobook_narrator.storage import ProjectStore
 from audiobook_narrator.textsplit import extract_dialogue_text, is_dialogue, split_passages
 
+
+logger = logging.getLogger(__name__)
+
+ANNOTATE_SYSTEM_PROMPT = """You are an audiobook director for Mandarin Chinese fiction.
+Use ElevenLabs v3 audio tags as the primary performance direction. Only use tags from this allowlist:
+__ALLOWED_AUDIO_TAGS__
+
+Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index and contain:
+{
+  "chunk_index": 0,
+  "speaker": "Narrator or character name",
+  "audio_tags": ["[tense]", "[whispers]"],
+  "pace": "slow|medium|quick",
+  "intensity": 1-5,
+  "pause_after_ms": integer,
+  "rationale": "specific performance note tied to this passage"
+}
+Do not rewrite the text. Do not invent tags outside the allowlist. Use the exact chunk_index values supplied."""
+
+ANNOTATE_USER_TEMPLATE = """Story memory:
+{memory_json}
+
+Annotate these chunks:
+{chunks}"""
 
 EMOTION_MARKERS: list[tuple[Emotion, list[str]]] = [
     (Emotion.angry, ["怒", "愤", "吼", "骂", "恨"]),
@@ -23,7 +50,7 @@ def annotate_project(store: ProjectStore, project_id: str, provider: LLMProvider
     paths = store.paths(project_id)
     memory = store.load_memory(project_id)
     annotated: dict[str, list[Passage]] = {}
-    for source_path in sorted(paths.source.glob("*.txt")):
+    for source_path in source_chapter_paths(paths.source):
         chapter_id = source_path.stem
         text = source_path.read_text(encoding="utf-8")
         passages = annotate_chapter(chapter_id, text, memory, provider)
@@ -36,7 +63,7 @@ def annotate_chapter(
     chapter_id: str, text: str, memory: StoryMemory, provider: LLMProvider
 ) -> list[Passage]:
     chunks = split_passages(text)
-    if provider.__class__.__name__ != "HeuristicLLMProvider" and len(text) < 14000:
+    if provider.__class__.__name__ != "HeuristicLLMProvider":
         llm_rows = try_llm_annotation(chapter_id, chunks, memory, provider)
         if llm_rows:
             return llm_rows
@@ -46,36 +73,173 @@ def annotate_chapter(
 def try_llm_annotation(
     chapter_id: str, chunks: list[str], memory: StoryMemory, provider: LLMProvider
 ) -> list[Passage]:
+    if not chunks:
+        return []
     payload = provider.complete_json(
-        "You are an audiobook director. Return strict JSON with a passages array. "
-        "Each passage needs text, speaker, emotion, delivery, pace, intensity, pause_after_ms, rationale.",
-        "Story memory:\n"
-        + memory.model_dump_json(exclude_none=True)
-        + "\n\nAnnotate these chunks:\n"
-        + "\n".join(f"{i}: {chunk}" for i, chunk in enumerate(chunks)),
+        ANNOTATE_SYSTEM_PROMPT.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
+        ANNOTATE_USER_TEMPLATE.format(
+            memory_json=memory.model_dump_json(exclude_none=True),
+            chunks="\n".join(f"{i}: {chunk}" for i, chunk in enumerate(chunks)),
+        ),
     )
     rows = payload.get("passages", [])
-    passages: list[Passage] = []
-    for index, row in enumerate(rows):
+    if not isinstance(rows, list):
+        logger.warning("LLM annotation rejected chapter=%s reason=passages_not_list", chapter_id)
+        return []
+    by_index: dict[int, dict] = {}
+    for fallback_index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        raw_index = row.get("chunk_index", row.get("index", fallback_index))
         try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < len(chunks):
+            by_index[index] = row
+    passages: list[Passage] = []
+    llm_count = 0
+    for index, chunk in enumerate(chunks):
+        row = by_index.get(index)
+        if row is None:
+            passages.append(heuristic_passage(chapter_id, index, chunk, memory))
+            continue
+        try:
+            audio_tags = normalize_audio_tags(row.get("audio_tags") or row.get("tags"))
             passages.append(
-                Passage(
-                    passage_id=f"{chapter_id}-{index:04d}",
+                passage_from_llm_row(
                     chapter_id=chapter_id,
                     index=index,
-                    text=row.get("text") or chunks[index],
-                    speaker=row.get("speaker", "Narrator"),
-                    emotion=row.get("emotion", "neutral"),
-                    delivery=row.get("delivery", "matter-of-fact"),
-                    pace=row.get("pace", "medium"),
-                    intensity=row.get("intensity", 3),
-                    pause_after_ms=row.get("pause_after_ms", 350),
-                    rationale=row.get("rationale", ""),
+                    text=chunk,
+                    row=row,
+                    audio_tags=audio_tags,
                 )
             )
-        except Exception:
-            return []
-    return passages if len(passages) == len(chunks) else []
+            llm_count += 1
+        except Exception as exc:
+            logger.warning(
+                "LLM annotation row rejected chapter=%s index=%s error=%s", chapter_id, index, exc
+            )
+            passage = heuristic_passage(chapter_id, index, chunk, memory)
+            passage.audio_tags = audio_tags_for_passage(passage)
+            passages.append(passage)
+    logger.info(
+        "Annotation source chapter=%s llm_rows=%s chunks=%s", chapter_id, llm_count, len(chunks)
+    )
+    return passages
+
+
+def passage_from_llm_row(
+    chapter_id: str, index: int, text: str, row: dict, audio_tags: list[str]
+) -> Passage:
+    emotion = normalize_emotion(row.get("emotion"))
+    delivery = normalize_delivery(row.get("delivery"))
+    if not row.get("emotion"):
+        emotion = emotion_from_audio_tags(audio_tags)
+    if not row.get("delivery"):
+        delivery = delivery_from_audio_tags(audio_tags)
+    return Passage(
+        passage_id=f"{chapter_id}-{index:04d}",
+        chapter_id=chapter_id,
+        index=index,
+        text=text,
+        speaker=str(row.get("speaker") or "Narrator"),
+        emotion=emotion,
+        delivery=delivery,
+        pace=normalize_pace(row.get("pace")),
+        intensity=normalize_intensity(row.get("intensity")),
+        pause_after_ms=normalize_pause(row.get("pause_after_ms")),
+        audio_tags=audio_tags,
+        rationale=str(row.get("rationale") or "AI narration direction based on story context."),
+    )
+
+
+def emotion_from_audio_tags(audio_tags: list[str]) -> Emotion:
+    tags = {tag.strip("[]").lower() for tag in audio_tags}
+    if tags & {"angry", "shouts"}:
+        return Emotion.angry
+    if tags & {"fearful", "stuttering"}:
+        return Emotion.fearful
+    if tags & {"crying", "sad"}:
+        return Emotion.grief
+    if tags & {"softly", "whispers"}:
+        return Emotion.tender
+    if tags & {"curious"}:
+        return Emotion.wonder
+    if tags & {"laughs", "mischievously"}:
+        return Emotion.comic
+    if tags & {"serious"}:
+        return Emotion.solemn
+    if tags & {"tense"}:
+        return Emotion.tense
+    if tags & {"cheerfully", "excited", "happily"}:
+        return Emotion.urgent
+    return Emotion.neutral
+
+
+def delivery_from_audio_tags(audio_tags: list[str]) -> Delivery:
+    tags = {tag.strip("[]").lower() for tag in audio_tags}
+    if tags & {"shouts", "dramatically"}:
+        return Delivery.dramatic
+    if tags & {"softly", "whispers"}:
+        return Delivery.intimate
+    if tags & {"tense", "fearful", "stuttering"}:
+        return Delivery.suspenseful
+    if tags & {"serious"}:
+        return Delivery.clipped
+    if tags & {"curious", "sad", "crying"}:
+        return Delivery.reflective
+    return Delivery.conversational if audio_tags else Delivery.matter_of_fact
+
+
+def normalize_emotion(value: object) -> Emotion:
+    text = str(value or "neutral").strip().lower().replace("_", "-")
+    aliases = {
+        "sad": "grief",
+        "sadness": "grief",
+        "scared": "fearful",
+        "fear": "fearful",
+        "anxious": "tense",
+        "suspense": "tense",
+        "calm": "neutral",
+    }
+    text = aliases.get(text, text)
+    return Emotion(text) if text in {item.value for item in Emotion} else Emotion.neutral
+
+
+def normalize_delivery(value: object) -> Delivery:
+    text = str(value or "matter-of-fact").strip().lower().replace("_", "-")
+    aliases = {
+        "matter of fact": "matter-of-fact",
+        "plain": "matter-of-fact",
+        "warm": "intimate",
+        "suspense": "suspenseful",
+    }
+    text = aliases.get(text, text)
+    return Delivery(text) if text in {item.value for item in Delivery} else Delivery.matter_of_fact
+
+
+def normalize_pace(value: object) -> str:
+    text = str(value or "medium").strip().lower()
+    if text in {"slow", "medium", "quick"}:
+        return text
+    if text in {"fast", "rapid"}:
+        return "quick"
+    return "medium"
+
+
+def normalize_intensity(value: object) -> int:
+    try:
+        return max(1, min(5, int(value)))
+    except (TypeError, ValueError):
+        return 3
+
+
+def normalize_pause(value: object) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 350
 
 
 def heuristic_passage(chapter_id: str, index: int, text: str, memory: StoryMemory) -> Passage:
@@ -85,7 +249,7 @@ def heuristic_passage(chapter_id: str, index: int, text: str, memory: StoryMemor
     pace = "slow" if emotion in {Emotion.grief, Emotion.solemn, Emotion.tender} else "medium"
     if emotion in {Emotion.urgent, Emotion.angry, Emotion.fearful}:
         pace = "quick"
-    return Passage(
+    passage = Passage(
         passage_id=f"{chapter_id}-{index:04d}",
         chapter_id=chapter_id,
         index=index,
@@ -98,6 +262,8 @@ def heuristic_passage(chapter_id: str, index: int, text: str, memory: StoryMemor
         pause_after_ms=650 if text.endswith(("。", "！", "？")) else 300,
         rationale="Heuristic annotation based on punctuation, dialogue markers, and nearby emotion words.",
     )
+    passage.audio_tags = audio_tags_for_passage(passage)
+    return passage
 
 
 def infer_speaker(text: str, memory: StoryMemory) -> str:

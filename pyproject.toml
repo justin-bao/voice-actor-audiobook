@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Pipeline for annotating books with narration direction, speaker casting, and generated audiobook audio."
 requires-python = ">=3.11"
 dependencies = [
+  "certifi>=2024.8.30",
   "pydantic>=2.7",
   "python-dotenv>=1.0",
 ]

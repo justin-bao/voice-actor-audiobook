@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import ssl
 import subprocess
 import sys
 import urllib.error
@@ -14,6 +15,7 @@ from typing import Iterator, Protocol
 
 from dotenv import load_dotenv
 
+from audiobook_narrator.audio_tags import audio_tags_for_passage
 from audiobook_narrator.models import JsonDict, Passage
 
 load_dotenv()
@@ -394,7 +396,9 @@ class ElevenLabsTTSProvider:
         for passage in passages:
             voice_id = self.voice_id_for(passage.speaker, voice_by_speaker)
             text = passage.text.strip()
-            would_exceed_chars = char_count + len(text) > self.MAX_DIALOGUE_CHARS
+            audio_tags = audio_tags_for_passage(passage)
+            tagged_text = " ".join(audio_tags + [text]).strip()
+            would_exceed_chars = char_count + len(tagged_text) > self.MAX_DIALOGUE_CHARS
             would_exceed_voices = voice_id not in voices and len(voices) >= self.MAX_UNIQUE_VOICES
             if inputs and (would_exceed_chars or would_exceed_voices):
                 chunks.append({"inputs": inputs, "manifest": manifest})
@@ -402,9 +406,12 @@ class ElevenLabsTTSProvider:
                 manifest = []
                 char_count = 0
                 voices = set()
-            inputs.append({"text": text, "voice_id": voice_id})
-            manifest.append(part_manifest_row(passage, voice_id, Path("")) | {"text_chars": len(text)})
-            char_count += len(text)
+            inputs.append({"text": tagged_text, "voice_id": voice_id})
+            manifest.append(
+                part_manifest_row(passage, voice_id, Path(""))
+                | {"audio_tags": audio_tags, "text_chars": len(text), "input_chars": len(tagged_text)}
+            )
+            char_count += len(tagged_text)
             voices.add(voice_id)
         if inputs:
             chunks.append({"inputs": inputs, "manifest": manifest})
@@ -439,7 +446,7 @@ class ElevenLabsTTSProvider:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=120, context=tls_context()) as response:
                 output_path.write_bytes(response.read())
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -454,7 +461,7 @@ class ElevenLabsTTSProvider:
             headers={"xi-api-key": self.api_key, "Accept": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -486,6 +493,15 @@ def get_tts_provider(name: str | None = None) -> TTSProvider:
     return ScriptOnlyTTSProvider()
 
 
+def tls_context() -> ssl.SSLContext:
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
 def safe_filename(value: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in value)[:40] or "speaker"
 
@@ -499,5 +515,6 @@ def part_manifest_row(passage: Passage, voice: str, part_path: Path) -> dict:
         "emotion": passage.emotion.value,
         "delivery": passage.delivery.value,
         "pace": passage.pace,
+        "audio_tags": audio_tags_for_passage(passage),
         "path": str(part_path),
     }

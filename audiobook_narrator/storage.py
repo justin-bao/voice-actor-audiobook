@@ -6,7 +6,7 @@ from typing import Iterable, TypeVar
 
 from pydantic import BaseModel
 
-from audiobook_narrator.models import ProjectConfig, ProjectPaths, StoryMemory
+from audiobook_narrator.models import ChapterMemory, ProjectConfig, ProjectPaths, StoryMemory
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -46,6 +46,24 @@ class ProjectStore:
     def save_memory(self, project_id: str, memory: StoryMemory) -> None:
         self.write_json(self.paths(project_id).memory / "story.json", memory)
 
+    def load_chapter_memory(self, project_id: str, chapter_id: str) -> ChapterMemory | None:
+        path = self.paths(project_id).memory / "chapters" / f"{chapter_id}.json"
+        if not path.exists():
+            return None
+        return self.read_json(path, ChapterMemory)
+
+    def save_chapter_memory(self, project_id: str, chapter_memory: ChapterMemory) -> None:
+        self.write_json(
+            self.paths(project_id).memory / "chapters" / f"{chapter_memory.chapter_id}.json",
+            chapter_memory,
+        )
+
+    def list_chapter_memories(self, project_id: str) -> list[ChapterMemory]:
+        folder = self.paths(project_id).memory / "chapters"
+        if not folder.exists():
+            return []
+        return [self.read_json(path, ChapterMemory) for path in sorted(folder.glob("*.json"))]
+
     @staticmethod
     def write_json(path: Path, model_or_dict: BaseModel | dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,4 +91,3 @@ class ProjectStore:
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-

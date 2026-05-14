@@ -5,23 +5,27 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from audiobook_narrator.audio_tags import normalize_audio_tags
 from audiobook_narrator.analyze import (
     GENERIC_PLOT_SUMMARY,
     UNKNOWN_PERSONALITY,
+    chapter_memory_from_analysis,
     source_chapter_paths,
     update_story_memory,
 )
 from audiobook_narrator.annotate import annotate_project
-from audiobook_narrator.cast import build_cast
+from audiobook_narrator.annotate import try_llm_annotation
+from audiobook_narrator.cast import build_cast, cast_from_memory
 from audiobook_narrator.cli import extension_for_backend
 from audiobook_narrator.evals import evaluate_analysis, evaluate_annotations, evaluate_cast
-from audiobook_narrator.models import Passage
+from audiobook_narrator.models import Cast, CastAssignment, CharacterMemory, Passage, StoryMemory, Voice
 from audiobook_narrator.ingest import ingest_chapter
 from audiobook_narrator.providers import (
     ElevenLabsTTSProvider,
     HeuristicLLMProvider,
     ScriptOnlyTTSProvider,
     provider_summary,
+    tls_context,
 )
 from audiobook_narrator.storage import ProjectStore
 from audiobook_narrator.synthesize import synthesize_chapter
@@ -87,6 +91,27 @@ class RecordingLLMProvider:
         }
 
 
+class PartialAnnotationProvider:
+    provider_name = "partial-annotation"
+
+    def complete_json(self, system: str, user: str) -> dict:
+        return {
+            "passages": [
+                {
+                    "chunk_index": 0,
+                    "speaker": "Narrator",
+                    "emotion": "anxious",
+                    "delivery": "suspense",
+                    "audio_tags": ["[suspense]", "[not a real tag]", "whispering"],
+                    "pace": "fast",
+                    "intensity": 6,
+                    "pause_after_ms": "500",
+                    "rationale": "Opening narration should feel tense.",
+                }
+            ]
+        }
+
+
 class PipelineTest(unittest.TestCase):
     def test_split_passages_preserves_dialogue_turns(self) -> None:
         passages = split_passages(SAMPLE)
@@ -133,7 +158,22 @@ class PipelineTest(unittest.TestCase):
             self.assertIn("秘密与追问", memory.themes)
             self.assertEqual(memory.pronunciation_notes["汪淼"], "Wang Miao")
             self.assertNotEqual(memory.characters["叶文洁"].personality, UNKNOWN_PERSONALITY)
+            self.assertEqual(set(memory.characters), {"叶文洁", "汪淼"})
             self.assertIn("汪淼", memory.characters)
+            chapter_memory = store.load_chapter_memory("book", "ch01")
+            self.assertIsNotNone(chapter_memory)
+            self.assertEqual(
+                chapter_memory.plot_summary,
+                "叶文洁和汪淼在压抑的谈话中面对无法轻易停止的危机。",
+            )
+            self.assertEqual(chapter_memory.current_state, memory.current_state)
+            self.assertIn("秘密与追问", chapter_memory.themes)
+            self.assertIn("叶文洁", chapter_memory.character_changes)
+            self.assertIn(
+                "克制",
+                chapter_memory.character_changes["叶文洁"].personality_at_this_point,
+            )
+            self.assertEqual(set(chapter_memory.character_changes), {"叶文洁", "汪淼"})
 
     def test_analyze_feeds_existing_memory_into_next_chapter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,6 +193,34 @@ class PipelineTest(unittest.TestCase):
             self.assertEqual(len(provider.users), 2)
             self.assertIn("ch01 summary", provider.users[1])
             self.assertEqual(memory.current_state, "ch02 state")
+            self.assertEqual(store.load_chapter_memory("book", "ch01").plot_summary, "ch01 summary")
+            self.assertEqual(store.load_chapter_memory("book", "ch02").plot_summary, "ch02 summary")
+
+    def test_chapter_memory_tracks_character_changes_separately(self) -> None:
+        analysis = {
+            "summary": "汪淼在追问中意识到叶文洁掌握更深的秘密。",
+            "current_state": "汪淼的怀疑加深，叶文洁保持克制。",
+            "themes": ["真相逼近"],
+            "character_changes": [
+                {
+                    "name": "汪淼",
+                    "role_in_chapter": "追问叶文洁。",
+                    "personality_at_this_point": "焦灼、执着。",
+                    "changes": "从试探转为确信存在隐情。",
+                    "evidence": ["你真的相信这一切会结束吗？"],
+                }
+            ],
+        }
+
+        chapter_memory = chapter_memory_from_analysis("ch01", "第一章", SAMPLE, analysis)
+
+        self.assertEqual(chapter_memory.plot_summary, analysis["summary"])
+        self.assertEqual(chapter_memory.current_state, analysis["current_state"])
+        self.assertIn("真相逼近", chapter_memory.themes)
+        self.assertEqual(
+            chapter_memory.character_changes["汪淼"].changes,
+            "从试探转为确信存在隐情。",
+        )
 
     def test_analyze_ignores_embedded_annotation_text_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -162,6 +230,17 @@ class PipelineTest(unittest.TestCase):
             (source / "ch01.annotated.txt").write_text("annotated", encoding="utf-8")
 
             self.assertEqual([path.name for path in source_chapter_paths(source)], ["ch01.txt"])
+
+    def test_analyze_uses_manifest_order_for_chapters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "source"
+            source.mkdir()
+            (source / "ch01.txt").write_text("one", encoding="utf-8")
+            (source / "ch01.manifest.json").write_text('{"chapter_id":"ch01","order":1}', encoding="utf-8")
+            (source / "ch02.txt").write_text("two", encoding="utf-8")
+            (source / "ch02.manifest.json").write_text('{"chapter_id":"ch02","order":0}', encoding="utf-8")
+
+            self.assertEqual([path.name for path in source_chapter_paths(source)], ["ch02.txt", "ch01.txt"])
 
     def test_eval_scores_cover_analysis_annotations_and_casting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -183,6 +262,66 @@ class PipelineTest(unittest.TestCase):
             self.assertIn("annotate_direction_richness", annotation_names)
             self.assertIn("cast_assignment_coverage", cast_names)
 
+    def test_cast_uses_elevenlabs_voices_and_preserves_existing_choices(self) -> None:
+        memory = StoryMemory(title="测试书")
+        memory.characters["汪淼"] = CharacterMemory(
+            name="汪淼",
+            age="adult",
+            gender="male",
+            personality="执着、紧张、理性。",
+            voice_notes="紧张但清晰的成年男性声音。",
+        )
+        memory.characters["叶文洁"] = CharacterMemory(
+            name="叶文洁",
+            age="adult",
+            gender="female",
+            personality="克制、沉重。",
+            voice_notes="低声、疲惫。",
+        )
+        existing = Cast(
+            assignments={
+                "汪淼": CastAssignment(character="汪淼", voice_id="saved_wang", reason="Manual pick")
+            },
+            voices={
+                "saved_wang": Voice(
+                    voice_id="saved_wang",
+                    provider_voice="voice-existing",
+                    language="zh",
+                )
+            },
+        )
+        voices = [
+            {"voice_id": "voice-male", "name": "Male Mandarin", "labels": {"gender": "male", "age": "adult"}},
+            {"voice_id": "voice-female", "name": "Female Mandarin", "labels": {"gender": "female", "age": "adult"}},
+        ]
+
+        cast = cast_from_memory(memory, existing=existing, elevenlabs_voices=voices)
+
+        self.assertEqual(cast.assignments["汪淼"].voice_id, "saved_wang")
+        self.assertEqual(cast.voices["saved_wang"].provider_voice, "voice-existing")
+        self.assertEqual(cast.voices[cast.assignments["叶文洁"].voice_id].provider_voice, "voice-female")
+
+    def test_annotation_uses_partial_llm_rows_without_total_fallback(self) -> None:
+        story_memory = StoryMemory(title="测试书")
+        chunks = ["旁白很紧张。", "“真的吗？”汪淼问。"]
+
+        passages = try_llm_annotation("ch01", chunks, story_memory, PartialAnnotationProvider())
+
+        self.assertEqual(len(passages), 2)
+        self.assertEqual(passages[0].emotion.value, "tense")
+        self.assertEqual(passages[0].delivery.value, "suspenseful")
+        self.assertEqual(passages[0].pace, "quick")
+        self.assertEqual(passages[0].intensity, 5)
+        self.assertEqual(passages[0].audio_tags, ["[tense]", "[whispers]"])
+        self.assertEqual(passages[0].rationale, "Opening narration should feel tense.")
+        self.assertIn("Heuristic annotation", passages[1].rationale)
+
+    def test_elevenlabs_audio_tags_are_normalized_to_allowlist(self) -> None:
+        self.assertEqual(
+            normalize_audio_tags(["[suspense]", "[not a tag]", "whispering", "urgent"]),
+            ["[tense]", "[whispers]", "[shouts]"],
+        )
+
     def test_elevenlabs_backend_chunks_dialogue_inputs(self) -> None:
         passages = [
             Passage(passage_id="ch01-0000", chapter_id="ch01", index=0, text="旁白。"),
@@ -192,6 +331,7 @@ class PipelineTest(unittest.TestCase):
                 index=1,
                 text="“你好。”汪淼说。",
                 speaker="汪淼",
+                audio_tags=["[whispers]", "[fake]"],
             ),
         ]
         with patch.dict(
@@ -209,9 +349,15 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(extension_for_backend("elevenlabs"), ".mp3")
         self.assertEqual(chunks[0]["inputs"][0]["voice_id"], "voice-default")
         self.assertEqual(chunks[0]["inputs"][1]["voice_id"], "voice-wang")
+        self.assertEqual(chunks[0]["inputs"][1]["text"], "[whispers] “你好。”汪淼说。")
+        self.assertEqual(chunks[0]["manifest"][1]["audio_tags"], ["[whispers]"])
 
     def test_provider_summary_names_heuristic_provider(self) -> None:
         self.assertEqual(provider_summary(HeuristicLLMProvider()), {"provider": "heuristic", "model": None})
+
+    def test_tls_context_uses_a_ca_store(self) -> None:
+        context = tls_context()
+        self.assertGreater(len(context.get_ca_certs()), 0)
 
 
 if __name__ == "__main__":

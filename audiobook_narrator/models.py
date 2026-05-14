@@ -51,6 +51,8 @@ class ChapterManifest(BaseModel):
 class CharacterMemory(BaseModel):
     name: str
     aliases: list[str] = Field(default_factory=list)
+    age: str = ""
+    gender: str = ""
     personality: str = ""
     role_in_plot: str = ""
     relationships: dict[str, str] = Field(default_factory=dict)
@@ -70,6 +72,25 @@ class StoryMemory(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class ChapterCharacterMemory(BaseModel):
+    name: str
+    role_in_chapter: str = ""
+    personality_at_this_point: str = ""
+    changes: str = ""
+    evidence: list[str] = Field(default_factory=list)
+
+
+class ChapterMemory(BaseModel):
+    chapter_id: str
+    title: str = ""
+    plot_summary: str = ""
+    current_state: str = ""
+    themes: list[str] = Field(default_factory=list)
+    pronunciation_notes: dict[str, str] = Field(default_factory=dict)
+    character_changes: dict[str, ChapterCharacterMemory] = Field(default_factory=dict)
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class Passage(BaseModel):
     passage_id: str
     chapter_id: str
@@ -83,6 +104,7 @@ class Passage(BaseModel):
     intensity: int = Field(default=3, ge=1, le=5)
     pause_after_ms: int = 350
     pronunciation_hints: dict[str, str] = Field(default_factory=dict)
+    audio_tags: list[str] = Field(default_factory=list)
     rationale: str = ""
 
 
@@ -120,4 +142,3 @@ class ProjectPaths(BaseModel):
 
 
 JsonDict = dict[str, Any]
-

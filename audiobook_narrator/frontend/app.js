@@ -4,12 +4,14 @@ const state = {
   project: null,
   selectedChapterId: null,
   memory: null,
+  chapterMemory: null,
   annotations: [],
   annotatedText: "",
   cast: null,
   elevenVoices: [],
   pendingDeleteChapterId: null,
   pendingDeleteBookId: null,
+  loadingElevenVoices: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -67,30 +69,58 @@ async function loadProject(projectId, chapterId = null) {
   state.project = payload.config;
   state.selectedChapterId = payload.selected_chapter_id;
   state.memory = payload.memory;
+  state.chapterMemory = payload.chapter_memory;
   state.annotations = payload.annotations || [];
   state.annotatedText = payload.annotated_text || "";
   state.chapters = payload.chapters || [];
   state.cast = payload.cast;
   renderProject(payload);
+  ensureElevenLabsVoicesLoaded();
   setStatus(`${payload.config.title} loaded`);
 }
 
 function renderProject(payload) {
   $("project-meta").textContent = payload.config.title;
   $("project-select").value = payload.config.project_id;
-  $("chapter-select").innerHTML = payload.chapters
-    .map((c) => `<option value="${escapeHtml(c.chapter_id)}">${escapeHtml(c.title || c.chapter_id)}</option>`)
-    .join("");
-  if (payload.selected_chapter_id) $("chapter-select").value = payload.selected_chapter_id;
+  renderToc();
   const chapter = payload.chapters.find((c) => c.chapter_id === payload.selected_chapter_id);
   $("chapter-id").value = payload.selected_chapter_id || "ch01";
   $("chapter-title").value = chapter?.title || "";
   $("book-editor").value = payload.source_text || "";
+  renderChapterHydration();
   renderMemory();
   renderCharacters();
   renderAnnotationsPanel();
   renderTranscript();
   renderCast();
+}
+
+function renderToc() {
+  $("toc-count").textContent = String(state.chapters.length);
+  $("toc-list").innerHTML = state.chapters
+    .map((chapter, index) => `
+      <li class="toc-item ${chapter.chapter_id === state.selectedChapterId ? "active" : ""}"
+        draggable="true"
+        data-chapter-id="${escapeAttr(chapter.chapter_id)}">
+        <span class="toc-handle" aria-hidden="true">☰</span>
+        <button class="toc-title" title="${escapeAttr(chapter.title || chapter.chapter_id)}">
+          ${index + 1}. ${escapeHtml(chapter.title || chapter.chapter_id)}
+        </button>
+        <button class="toc-delete danger" title="Delete chapter">×</button>
+      </li>
+    `)
+    .join("") + `
+      <li class="toc-add-row">
+        <button id="new-chapter" class="toc-add" title="Add chapter">＋ Chapter</button>
+      </li>
+    `;
+}
+
+function renderChapterHydration() {
+  const hasChapter = Boolean(state.selectedChapterId);
+  document.querySelector(".workspace").classList.toggle("no-chapter", !hasChapter);
+  document.querySelector(".editor-band").classList.toggle("no-chapter", !hasChapter);
+  $("empty-editor").classList.toggle("active", !hasChapter);
 }
 
 function renderMemory() {
@@ -101,6 +131,51 @@ function renderMemory() {
   $("pronunciation-list").innerHTML = Object.entries(memory.pronunciation_notes || {})
     .map(([key, value]) => pronunciationRow(key, value))
     .join("");
+  renderChapterMemory();
+}
+
+function renderChapterMemory() {
+  const chapterMemory = state.chapterMemory || {};
+  const chapter = state.chapters.find((row) => row.chapter_id === state.selectedChapterId);
+  $("chapter-memory-section").hidden = !state.selectedChapterId;
+  $("chapter-memory-label").textContent = state.selectedChapterId
+    ? `${chapter?.title || state.selectedChapterId} · not merged backward unless you save/analyze`
+    : "No chapter selected";
+  $("chapter-plot-summary").value = chapterMemory.plot_summary || "";
+  $("chapter-current-state").value = chapterMemory.current_state || "";
+  $("chapter-themes").value = (chapterMemory.themes || []).join(", ");
+  $("chapter-character-changes").innerHTML = Object.values(chapterMemory.character_changes || {})
+    .map((change) => `
+      <article class="item chapter-change-item" data-name="${escapeAttr(change.name)}">
+        <div class="item-head">
+          <input class="chapter-change-name item-title" value="${escapeAttr(change.name)}" />
+        </div>
+        <div class="chapter-change-grid">
+          <textarea class="chapter-change-personality" placeholder="Personality during this chapter">${escapeHtml(change.personality_at_this_point || "")}</textarea>
+          <textarea class="chapter-change-delta" placeholder="How the character changes in this chapter">${escapeHtml(change.changes || "")}</textarea>
+        </div>
+      </article>
+    `)
+    .join("");
+}
+
+function addChapterChange() {
+  if (!state.selectedChapterId) return;
+  state.chapterMemory ||= {
+    chapter_id: state.selectedChapterId,
+    title: $("chapter-title").value || state.selectedChapterId,
+    character_changes: {},
+  };
+  state.chapterMemory.character_changes ||= {};
+  const name = `Character ${Object.keys(state.chapterMemory.character_changes).length + 1}`;
+  state.chapterMemory.character_changes[name] = {
+    name,
+    role_in_chapter: "",
+    personality_at_this_point: "",
+    changes: "",
+    evidence: [],
+  };
+  renderChapterMemory();
 }
 
 function pronunciationRow(key = "", value = "") {
@@ -116,20 +191,26 @@ function pronunciationRow(key = "", value = "") {
 function renderCharacters() {
   const characters = state.memory?.characters || {};
   $("characters-list").innerHTML = Object.values(characters)
-    .map((character) => `
+    .map((character) => {
+      const assignment = characterCastAssignment(character.name);
+      const voice = assignment ? state.cast?.voices?.[assignment.voice_id] : null;
+      return `
       <article class="item character-item" data-name="${escapeAttr(character.name)}">
         <div class="item-head">
           <input class="character-name item-title" value="${escapeAttr(character.name)}" />
           <button class="danger remove-character" title="Remove">×</button>
         </div>
         <div class="character-grid">
-          <textarea class="character-personality" placeholder="Personality">${escapeHtml(character.personality || "")}</textarea>
-          <textarea class="character-role" placeholder="Role in plot">${escapeHtml(character.role_in_plot || "")}</textarea>
           <input class="character-aliases" value="${escapeAttr((character.aliases || []).join(", "))}" placeholder="aliases" />
-          <input class="character-voice-notes" value="${escapeAttr(character.voice_notes || "")}" placeholder="voice notes" />
+          <input class="character-age" value="${escapeAttr(character.age || "")}" placeholder="age / life stage" />
+          <input class="character-gender" value="${escapeAttr(character.gender || "")}" placeholder="gender / presentation" />
+          ${providerVoiceControl(voice?.provider_voice || "", "character-provider-voice")}
+          <textarea class="character-personality" placeholder="Base personality / overall profile">${escapeHtml(character.personality || "")}</textarea>
+          <textarea class="character-voice-notes" placeholder="Voice casting notes">${escapeHtml(character.voice_notes || "")}</textarea>
         </div>
       </article>
-    `)
+    `;
+    })
     .join("");
 }
 
@@ -159,6 +240,7 @@ function inlineAnnotationHtml(row, index) {
         <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity" />
         <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" title="pause ms" />
       </div>
+      <input class="ann-tags" value="${escapeAttr((row.audio_tags || []).join(", "))}" placeholder="[tense], [whispers]" />
       <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
       <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
     </article>
@@ -178,6 +260,7 @@ function buildEmbeddedAnnotationText(annotations) {
       `pace=${row.pace || "medium"}`,
       `intensity=${Number(row.intensity || 3)}`,
       `pause_ms=${Number(row.pause_after_ms || 350)}`,
+      `tags=${(row.audio_tags || []).join(",")}`,
     ];
     lines.push(`[[${meta.join(" | ")}]]`);
     if (row.rationale) lines.push(`// ${row.rationale}`);
@@ -200,7 +283,7 @@ function renderCast() {
           </div>
           <div class="cast-grid">
             <input class="cast-voice-id" value="${escapeAttr(assignment.voice_id)}" placeholder="voice id" />
-            <input class="cast-provider-voice" value="${escapeAttr(voice.provider_voice || "")}" placeholder="provider voice / ElevenLabs voice id" />
+            ${providerVoiceControl(voice.provider_voice || "")}
             <textarea class="cast-reason" placeholder="reason">${escapeHtml(assignment.reason || "")}</textarea>
           </div>
         </article>
@@ -209,11 +292,55 @@ function renderCast() {
     .join("");
 }
 
+function characterCastAssignment(character) {
+  return state.cast?.assignments?.[character] || null;
+}
+
+function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-voice") {
+  if (!state.elevenVoices.length) {
+    return `<input class="${className}" value="${escapeAttr(selectedVoiceId)}" placeholder="provider voice / ElevenLabs voice id" />`;
+  }
+  const selectedExists = state.elevenVoices.some((voice) => voice.voice_id === selectedVoiceId);
+  const options = state.elevenVoices
+    .map((voice) => {
+      const labels = voice.labels || {};
+      const detail = [labels.gender, labels.age, labels.accent].filter(Boolean).join(", ");
+      const label = `${voice.name || voice.voice_id}${detail ? ` (${detail})` : ""}`;
+      return `<option value="${escapeAttr(voice.voice_id)}" ${voice.voice_id === selectedVoiceId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  const current = selectedVoiceId && !selectedExists
+    ? `<option value="${escapeAttr(selectedVoiceId)}" selected>${escapeHtml(selectedVoiceId)}</option>`
+    : "";
+  return `<select class="${className}"><option value="">Select ElevenLabs voice...</option>${current}${options}</select>`;
+}
+
 function renderElevenVoices() {
   $("voice-library").innerHTML = state.elevenVoices
     .slice(0, 40)
     .map((voice) => `<button class="voice-pill" data-voice-id="${escapeAttr(voice.voice_id)}">${escapeHtml(voice.name || voice.voice_id)}</button>`)
     .join("");
+}
+
+function ensureElevenLabsVoicesLoaded() {
+  if (state.elevenVoices.length || state.loadingElevenVoices) return;
+  loadElevenLabsVoices({ quiet: true });
+}
+
+async function loadElevenLabsVoices({ quiet = false } = {}) {
+  state.loadingElevenVoices = true;
+  try {
+    const payload = await api("/api/elevenlabs/voices");
+    state.elevenVoices = payload.voices || [];
+    renderElevenVoices();
+    renderCharacters();
+    renderCast();
+    if (!quiet) setStatus(`${state.elevenVoices.length} ElevenLabs voices loaded`);
+  } catch (error) {
+    if (!quiet) setStatus(`ElevenLabs voices unavailable: ${error.message}`);
+  } finally {
+    state.loadingElevenVoices = false;
+  }
 }
 
 function selectHtml(className, options, selected) {
@@ -269,8 +396,29 @@ async function saveMemory() {
     body: JSON.stringify(memory),
   });
   state.memory = memory;
+  if (state.selectedChapterId) {
+    const chapterMemory = collectChapterMemory();
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapter-memory/${encodeURIComponent(state.selectedChapterId)}`, {
+      method: "POST",
+      body: JSON.stringify(chapterMemory),
+    });
+    state.chapterMemory = chapterMemory;
+  }
   renderCharacters();
   setStatus("Memory saved");
+}
+
+async function saveCharacterProfiles() {
+  if (!state.project) return;
+  const memory = collectMemory();
+  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/memory`, {
+    method: "POST",
+    body: JSON.stringify(memory),
+  });
+  state.memory = memory;
+  await saveCharacterVoiceAssignments();
+  renderCharacters();
+  setStatus("Character profiles and voices saved");
 }
 
 function collectMemory() {
@@ -293,14 +441,42 @@ function collectMemory() {
     memory.characters[name] = {
       name,
       aliases: item.querySelector(".character-aliases").value.split(",").map((x) => x.trim()).filter(Boolean),
+      age: item.querySelector(".character-age").value,
+      gender: item.querySelector(".character-gender").value,
       personality: item.querySelector(".character-personality").value,
-      role_in_plot: item.querySelector(".character-role").value,
+      role_in_plot: originalCharacter(name)?.role_in_plot || "",
       relationships: {},
       voice_notes: item.querySelector(".character-voice-notes").value,
       evidence: [],
     };
   });
   return memory;
+}
+
+function collectChapterMemory() {
+  const chapterMemory = structuredClone(state.chapterMemory || {});
+  chapterMemory.chapter_id = state.selectedChapterId;
+  chapterMemory.title = $("chapter-title").value || state.selectedChapterId || "";
+  chapterMemory.plot_summary = $("chapter-plot-summary").value;
+  chapterMemory.current_state = $("chapter-current-state").value;
+  chapterMemory.themes = $("chapter-themes").value.split(",").map((x) => x.trim()).filter(Boolean);
+  chapterMemory.character_changes = {};
+  document.querySelectorAll(".chapter-change-item").forEach((item) => {
+    const name = item.querySelector(".chapter-change-name").value.trim();
+    if (!name) return;
+    chapterMemory.character_changes[name] = {
+      name,
+      role_in_chapter: "",
+      personality_at_this_point: item.querySelector(".chapter-change-personality").value,
+      changes: item.querySelector(".chapter-change-delta").value,
+      evidence: [],
+    };
+  });
+  return chapterMemory;
+}
+
+function originalCharacter(name) {
+  return state.memory?.characters?.[name] || null;
 }
 
 function collectAnnotations() {
@@ -319,6 +495,7 @@ function collectAnnotations() {
       pace: item.querySelector(".ann-pace").value,
       intensity: Number(item.querySelector(".ann-intensity").value || 3),
       pause_after_ms: Number(item.querySelector(".ann-pause").value || 350),
+      audio_tags: item.querySelector(".ann-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
       rationale: item.querySelector(".ann-rationale").value,
       pronunciation_hints: original.pronunciation_hints || {},
     });
@@ -344,13 +521,11 @@ async function resetAnnotations() {
   }
 }
 
-async function deleteCurrentChapter() {
-  if (!state.project || !state.selectedChapterId) return;
-  const chapterId = state.selectedChapterId;
-  const button = $("delete-chapter");
+async function deleteChapterById(chapterId, button) {
+  if (!state.project || !chapterId || !button) return;
   if (state.pendingDeleteChapterId !== chapterId) {
     state.pendingDeleteChapterId = chapterId;
-    button.textContent = "Confirm Delete";
+    button.textContent = "!";
     button.classList.add("armed");
     setStatus(`Click Confirm Delete to remove ${chapterId}`);
     return;
@@ -363,12 +538,7 @@ async function deleteCurrentChapter() {
       body: JSON.stringify({}),
     });
     resetDeleteButton();
-    const remaining = payload.remaining_chapter_ids || [];
-    if (remaining.length) {
-      await loadProject(state.project.project_id, remaining[0]);
-    } else {
-      clearChapterUi();
-    }
+    await loadProject(state.project.project_id);
     setStatus(`Deleted ${chapterId}`);
   } catch (error) {
     setStatus(`Delete failed: ${error.message}`);
@@ -377,13 +547,18 @@ async function deleteCurrentChapter() {
   }
 }
 
+async function deleteCurrentChapter() {
+  const item = document.querySelector(`.toc-item[data-chapter-id="${CSS.escape(state.selectedChapterId || "")}"]`);
+  await deleteChapterById(state.selectedChapterId, item?.querySelector(".toc-delete"));
+}
+
 async function deleteCurrentBook() {
   if (!state.project) return;
   const bookId = state.project.project_id;
   const button = $("delete-book");
   if (state.pendingDeleteBookId !== bookId) {
     state.pendingDeleteBookId = bookId;
-    button.textContent = "Confirm Book Delete";
+    button.textContent = "!";
     button.classList.add("armed");
     setStatus(`Click Confirm Book Delete to remove ${state.project.title}`);
     return;
@@ -436,6 +611,37 @@ async function saveCast() {
   setStatus("Voice cast saved");
 }
 
+async function saveCharacterVoiceAssignments() {
+  if (!state.project) return;
+  state.cast ||= { assignments: {}, voices: {} };
+  document.querySelectorAll(".character-item").forEach((item, index) => {
+    const character = item.querySelector(".character-name").value.trim();
+    const providerVoice = item.querySelector(".character-provider-voice")?.value.trim();
+    if (!character || !providerVoice) return;
+    const existing = state.cast.assignments?.[character];
+    const voiceId = existing?.voice_id || `character_${safeId(character || String(index + 1))}`;
+    state.cast.assignments[character] = {
+      character,
+      voice_id: voiceId,
+      reason: item.querySelector(".character-voice-notes").value || "Selected from the book character profile.",
+    };
+    state.cast.voices[voiceId] = {
+      ...(state.cast.voices?.[voiceId] || {}),
+      voice_id: voiceId,
+      provider_voice: providerVoice,
+      language: state.cast.voices?.[voiceId]?.language || "zh",
+      age: item.querySelector(".character-age").value || state.cast.voices?.[voiceId]?.age || null,
+      gender: item.querySelector(".character-gender").value || state.cast.voices?.[voiceId]?.gender || null,
+      timbre: item.querySelector(".character-voice-notes").value || state.cast.voices?.[voiceId]?.timbre || "",
+      suitable_for: [character],
+    };
+  });
+  await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/cast`, {
+    method: "POST",
+    body: JSON.stringify(state.cast),
+  });
+}
+
 async function runStep(step) {
   if (!state.project) return;
   const busyCopy = {
@@ -477,11 +683,21 @@ async function importFile(file) {
   setStatus(`${file.name} imported`);
 }
 
+async function importFiles(fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  if (files.length === 1) {
+    await importFile(files[0]);
+    return;
+  }
+  await bulkImportFiles(files);
+}
+
 async function bulkImportFiles(fileList) {
   if (!state.project || !fileList?.length) return;
   const files = Array.from(fileList).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  setBusy(true, "Bulk Importing", `Importing and analyzing ${files.length} chapters in order...`);
-  setStatus(`Bulk import started for ${files.length} chapters`);
+  setBusy(true, "Importing", `Importing and analyzing ${files.length} chapters in order...`);
+  setStatus(`Import started for ${files.length} chapters`);
   try {
     const uploads = [];
     for (const file of files) {
@@ -491,11 +707,10 @@ async function bulkImportFiles(fileList) {
       method: "POST",
       body: JSON.stringify({ files: uploads, analyze: true }),
     });
-    const last = payload.manifests?.at(-1)?.chapter_id || state.selectedChapterId;
-    await loadProject(state.project.project_id, last);
+    await loadProject(state.project.project_id);
     setStatus(`Imported ${payload.manifests?.length || 0} chapters and updated memory`);
   } catch (error) {
-    setStatus(`Bulk import failed: ${error.message}`);
+    setStatus(`Import failed: ${error.message}`);
   } finally {
     setBusy(false);
   }
@@ -517,6 +732,8 @@ function addCharacter() {
   state.memory.characters[name] = {
     name,
     aliases: [],
+    age: "",
+    gender: "",
     personality: "",
     role_in_plot: "",
     relationships: {},
@@ -535,7 +752,58 @@ function addCast() {
   renderCast();
 }
 
+function createNewChapter() {
+  if (!state.project) return;
+  const next = `ch${String((state.chapters.length || 0) + 1).padStart(2, "0")}`;
+  $("chapter-id").value = next;
+  $("chapter-title").value = "";
+  $("book-editor").value = "";
+  state.selectedChapterId = next;
+  state.annotations = [];
+  state.annotatedText = "";
+  state.chapterMemory = null;
+  resetDeleteButton();
+  renderToc();
+  renderChapterHydration();
+  renderAnnotationsPanel();
+  renderTranscript();
+}
+
+async function renameCurrentBook() {
+  if (!state.project) return;
+  const title = prompt("Rename book", state.project.title);
+  if (!title || title.trim() === state.project.title) return;
+  const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/rename`, {
+    method: "POST",
+    body: JSON.stringify({ title: title.trim() }),
+  });
+  state.project = payload.config;
+  await refreshProjects();
+  await loadProject(state.project.project_id);
+  setStatus(`Renamed book to ${state.project.title}`);
+}
+
+async function reorderChapters(chapterIds) {
+  if (!state.project) return;
+  const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapters-reorder`, {
+    method: "POST",
+    body: JSON.stringify({ chapter_ids: chapterIds }),
+  });
+  state.chapters = payload.chapters || state.chapters;
+  renderToc();
+  setStatus("Chapter order saved");
+}
+
 function wireEvents() {
+  $("open-book-modal").addEventListener("click", () => {
+    $("project-title").value = "";
+    $("book-modal").showModal();
+    $("project-title").focus();
+  });
+  document.querySelectorAll(".close-modal").forEach((button) => {
+    button.addEventListener("click", () => $("book-modal").close());
+  });
+
   $("project-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = $("project-title").value.trim();
@@ -545,30 +813,61 @@ function wireEvents() {
       body: JSON.stringify({ title, language: "zh" }),
     });
     $("project-title").value = "";
+    $("book-modal").close();
     await refreshProjects();
     await loadProject(project.project_id);
   });
 
   $("project-select").addEventListener("change", (event) => loadProject(event.target.value));
-  $("chapter-select").addEventListener("change", (event) => loadProject(state.project.project_id, event.target.value));
-  $("new-chapter").addEventListener("click", () => {
-    const next = `ch${String(($("chapter-select").options.length || 0) + 1).padStart(2, "0")}`;
-    $("chapter-id").value = next;
-    $("chapter-title").value = "";
-    $("book-editor").value = "";
-    state.selectedChapterId = next;
-    state.annotations = [];
-    state.annotatedText = "";
-    resetDeleteButton();
-    renderAnnotationsPanel();
-    renderTranscript();
+  $("rename-book").addEventListener("click", renameCurrentBook);
+  $("toc-list").addEventListener("click", (event) => {
+    if (event.target.closest("#new-chapter")) {
+      createNewChapter();
+      return;
+    }
+    const deleteButton = event.target.closest(".toc-delete");
+    if (deleteButton) {
+      const item = deleteButton.closest(".toc-item");
+      deleteChapterById(item?.dataset.chapterId, deleteButton);
+      return;
+    }
+    const item = event.target.closest(".toc-item");
+    if (!item || !state.project) return;
+    loadProject(state.project.project_id, item.dataset.chapterId);
+  });
+  $("toc-list").addEventListener("dragstart", (event) => {
+    const item = event.target.closest(".toc-item");
+    if (!item) return;
+    event.dataTransfer.setData("text/plain", item.dataset.chapterId);
+    event.dataTransfer.effectAllowed = "move";
+  });
+  $("toc-list").addEventListener("dragover", (event) => {
+    const item = event.target.closest(".toc-item");
+    if (!item) return;
+    event.preventDefault();
+    document.querySelectorAll(".toc-item.drag-over").forEach((node) => node.classList.remove("drag-over"));
+    item.classList.add("drag-over");
+  });
+  $("toc-list").addEventListener("dragleave", (event) => {
+    event.target.closest(".toc-item")?.classList.remove("drag-over");
+  });
+  $("toc-list").addEventListener("drop", async (event) => {
+    const item = event.target.closest(".toc-item");
+    if (!item) return;
+    event.preventDefault();
+    document.querySelectorAll(".toc-item.drag-over").forEach((node) => node.classList.remove("drag-over"));
+    const draggedId = event.dataTransfer.getData("text/plain");
+    const targetId = item.dataset.chapterId;
+    if (!draggedId || draggedId === targetId) return;
+    const ids = state.chapters.map((chapter) => chapter.chapter_id).filter((id) => id !== draggedId);
+    ids.splice(ids.indexOf(targetId), 0, draggedId);
+    await reorderChapters(ids);
   });
   $("save-chapter").addEventListener("click", saveChapter);
   $("reset-annotations").addEventListener("click", resetAnnotations);
-  $("delete-chapter").addEventListener("click", deleteCurrentChapter);
   $("delete-book").addEventListener("click", deleteCurrentBook);
   $("save-memory").addEventListener("click", saveMemory);
-  $("save-characters").addEventListener("click", saveMemory);
+  $("save-characters").addEventListener("click", saveCharacterProfiles);
   $("save-annotations").addEventListener("click", saveChapter);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
@@ -577,12 +876,12 @@ function wireEvents() {
   $("run-cast").addEventListener("click", () => runStep("cast"));
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("import-file").addEventListener("click", () => $("file-input").click());
-  $("bulk-import").addEventListener("click", () => $("bulk-file-input").click());
-  $("file-input").addEventListener("change", (event) => importFile(event.target.files[0]));
-  $("bulk-file-input").addEventListener("change", (event) => bulkImportFiles(event.target.files));
+  $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
+  $("file-input").addEventListener("change", (event) => importFiles(event.target.files));
   $("add-pronunciation").addEventListener("click", () => {
     $("pronunciation-list").insertAdjacentHTML("beforeend", pronunciationRow());
   });
+  $("add-chapter-change").addEventListener("click", addChapterChange);
   $("add-character").addEventListener("click", addCharacter);
   $("characters-list").addEventListener("click", (event) => {
     if (event.target.matches(".remove-character")) event.target.closest(".character-item").remove();
@@ -597,12 +896,6 @@ function wireEvents() {
     if (!event.target.matches(".voice-pill")) return;
     navigator.clipboard?.writeText(event.target.dataset.voiceId);
     setStatus(`Copied ${event.target.dataset.voiceId}`);
-  });
-  $("load-elevenlabs").addEventListener("click", async () => {
-    const payload = await api("/api/elevenlabs/voices");
-    state.elevenVoices = payload.voices || [];
-    renderElevenVoices();
-    setStatus(`${state.elevenVoices.length} ElevenLabs voices loaded`);
   });
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -619,27 +912,30 @@ function clearChapterUi() {
   state.chapters = [];
   state.annotations = [];
   state.annotatedText = "";
-  $("chapter-select").innerHTML = "";
+  $("toc-list").innerHTML = "";
+  $("toc-count").textContent = "0";
   $("chapter-id").value = "ch01";
   $("chapter-title").value = "";
   $("book-editor").value = "";
   renderAnnotationsPanel();
+  renderChapterHydration();
+  renderMemory();
   renderTranscript();
 }
 
 function resetDeleteButton() {
   state.pendingDeleteChapterId = null;
-  const button = $("delete-chapter");
-  if (!button) return;
-  button.textContent = "Delete Chapter";
-  button.classList.remove("armed");
+  document.querySelectorAll(".toc-delete").forEach((button) => {
+    button.textContent = "×";
+    button.classList.remove("armed");
+  });
 }
 
 function resetBookDeleteButton() {
   state.pendingDeleteBookId = null;
   const button = $("delete-book");
   if (!button) return;
-  button.textContent = "Delete Book";
+  button.textContent = "🗑";
   button.classList.remove("armed");
 }
 
@@ -653,6 +949,10 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replaceAll("'", "&#39;");
+}
+
+function safeId(value) {
+  return String(value || "voice").trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "_").replace(/^_+|_+$/g, "") || "voice";
 }
 
 window.addEventListener("DOMContentLoaded", async () => {

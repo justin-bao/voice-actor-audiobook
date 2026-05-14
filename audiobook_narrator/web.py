@@ -79,6 +79,21 @@ class NarratorWebApp:
         config = self.store.create_project(project_id, title, language)
         return config.model_dump(mode="json")
 
+    def rename_project(self, project_id: str, body: dict) -> dict:
+        project_id = self.safe_project_id(project_id)
+        title = body.get("title", "").strip()
+        if not title:
+            raise ValueError("Book title is required.")
+        config = self.store.load_config(project_id)
+        config.title = title
+        self.store.write_json(self.store.paths(project_id).root / "project.json", config)
+        memory_path = self.store.paths(project_id).memory / "story.json"
+        if memory_path.exists():
+            memory = self.store.load_memory(project_id)
+            memory.title = title
+            self.store.save_memory(project_id, memory)
+        return {"ok": True, "config": config.model_dump(mode="json")}
+
     def delete_project(self, project_id: str) -> dict:
         project_id = self.safe_project_id(project_id)
         root = self.store.paths(project_id).root
@@ -89,13 +104,12 @@ class NarratorWebApp:
     def project_payload(self, project_id: str, chapter_id: str | None = None) -> dict:
         paths = self.store.paths(project_id)
         config = self.store.load_config(project_id)
-        chapters = []
-        for manifest_path in sorted(paths.source.glob("*.manifest.json")):
-            chapters.append(json.loads(manifest_path.read_text(encoding="utf-8")))
-        selected = chapter_id or (chapters[0]["chapter_id"] if chapters else None)
+        chapters = self.load_chapter_manifests(project_id)
+        selected = chapter_id
         source_text = ""
         annotations = []
         annotated_text = ""
+        chapter_memory = None
         if selected:
             source_path = paths.source / f"{selected}.txt"
             if source_path.exists():
@@ -104,6 +118,9 @@ class NarratorWebApp:
             annotated_path = paths.source / f"{selected}.annotated.txt"
             if annotated_path.exists():
                 annotated_text = annotated_path.read_text(encoding="utf-8")
+            loaded_chapter_memory = self.store.load_chapter_memory(project_id, selected)
+            if loaded_chapter_memory:
+                chapter_memory = loaded_chapter_memory.model_dump(mode="json")
         memory_path = paths.memory / "story.json"
         cast_path = paths.casts / "voices.json"
         return {
@@ -112,6 +129,7 @@ class NarratorWebApp:
             "selected_chapter_id": selected,
             "source_text": source_text,
             "memory": json.loads(memory_path.read_text(encoding="utf-8")) if memory_path.exists() else None,
+            "chapter_memory": chapter_memory,
             "annotations": annotations,
             "annotated_text": annotated_text,
             "cast": json.loads(cast_path.read_text(encoding="utf-8")) if cast_path.exists() else None,
@@ -124,13 +142,18 @@ class NarratorWebApp:
         source_path = paths.source / f"{chapter_id}.txt"
         source_path.parent.mkdir(parents=True, exist_ok=True)
         source_path.write_text(body.get("text", ""), encoding="utf-8")
+        manifest_path = paths.source / f"{chapter_id}.manifest.json"
+        existing_manifest = (
+            json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+        )
         manifest = {
             "chapter_id": chapter_id,
             "title": title,
             "source_path": str(source_path),
             "char_count": len(body.get("text", "")),
+            "order": existing_manifest.get("order", self.next_chapter_order(project_id)),
         }
-        self.store.write_json(paths.source / f"{chapter_id}.manifest.json", manifest)
+        self.store.write_json(manifest_path, manifest)
         return {"ok": True, "manifest": manifest}
 
     def import_chapter(self, project_id: str, body: dict) -> dict:
@@ -144,7 +167,13 @@ class NarratorWebApp:
             manifest = ingest_chapter(self.store, project_id, tmp, title, chapter_id)
         finally:
             tmp.unlink(missing_ok=True)
-        return {"ok": True, "manifest": manifest.model_dump(mode="json"), "text": text}
+        manifest_payload = manifest.model_dump(mode="json")
+        manifest_payload["order"] = self.next_chapter_order(project_id, exclude_chapter_id=chapter_id)
+        self.store.write_json(
+            self.store.paths(project_id).source / f"{chapter_id}.manifest.json",
+            manifest_payload,
+        )
+        return {"ok": True, "manifest": manifest_payload, "text": text}
 
     def bulk_import(self, project_id: str, body: dict) -> dict:
         files = sorted(
@@ -190,6 +219,35 @@ class NarratorWebApp:
         self.store.save_memory(project_id, memory)
         return {"ok": True, "memory": memory.model_dump(mode="json")}
 
+    def save_chapter_memory(self, project_id: str, chapter_id: str, body: dict) -> dict:
+        from audiobook_narrator.models import ChapterMemory
+
+        payload = {**body, "chapter_id": self.safe_chapter_id(chapter_id)}
+        chapter_memory = ChapterMemory.model_validate(payload)
+        self.store.save_chapter_memory(project_id, chapter_memory)
+        return {"ok": True, "chapter_memory": chapter_memory.model_dump(mode="json")}
+
+    def reorder_chapters(self, project_id: str, body: dict) -> dict:
+        paths = self.store.paths(project_id)
+        chapter_ids = [self.safe_chapter_id(str(chapter_id)) for chapter_id in body.get("chapter_ids", [])]
+        seen = set()
+        ordered_ids = []
+        for chapter_id in chapter_ids:
+            if chapter_id not in seen:
+                ordered_ids.append(chapter_id)
+                seen.add(chapter_id)
+        manifests_by_id = {row["chapter_id"]: row for row in self.load_chapter_manifests(project_id)}
+        for chapter_id in manifests_by_id:
+            if chapter_id not in seen:
+                ordered_ids.append(chapter_id)
+        for order, chapter_id in enumerate(ordered_ids):
+            manifest = manifests_by_id.get(chapter_id)
+            if not manifest:
+                continue
+            manifest["order"] = order
+            self.store.write_json(paths.source / f"{chapter_id}.manifest.json", manifest)
+        return {"ok": True, "chapters": self.load_chapter_manifests(project_id)}
+
     def save_annotations(self, project_id: str, chapter_id: str, body: dict) -> dict:
         chapter_id = self.safe_chapter_id(chapter_id)
         passages = [Passage.model_validate(row) for row in body.get("annotations", [])]
@@ -232,6 +290,7 @@ class NarratorWebApp:
             paths.audio / f"{chapter_id}.mp3",
             paths.audio / f"{chapter_id}.aiff",
             paths.audio / f"{chapter_id}.parts.json",
+            paths.memory / "chapters" / f"{chapter_id}.json",
         ]
         candidates.extend(paths.audio.glob(f"{chapter_id}_*.mp3"))
         candidates.extend(paths.audio.glob(f"{chapter_id}_*.aiff"))
@@ -288,14 +347,16 @@ class NarratorWebApp:
                 )
                 passages = [passage for rows in annotated.values() for passage in rows]
                 score_langfuse_current_trace(evaluate_annotations(passages))
+                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
             flush_langfuse()
             return {
                 "ok": True,
                 "chapters": {key: len(value) for key, value in annotated.items()},
+                "cast": cast.model_dump(mode="json"),
                 "llm": provider_summary(provider),
             }
         if step == "cast":
-            cast = build_cast(self.store, project_id)
+            cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
             with langfuse_observation(
                 "audiobook-cast",
                 input={"project_id": project_id},
@@ -333,6 +394,36 @@ class NarratorWebApp:
     def elevenlabs_voices(self) -> dict:
         voices = ElevenLabsTTSProvider().list_voices()
         return {"voices": voices}
+
+    def safe_elevenlabs_voices(self) -> list[dict]:
+        try:
+            return ElevenLabsTTSProvider().list_voices()
+        except Exception as exc:
+            logger.warning("ElevenLabs voices unavailable for auto-casting: %s", exc)
+            return []
+
+    def load_chapter_manifests(self, project_id: str) -> list[dict]:
+        paths = self.store.paths(project_id)
+        rows = []
+        for index, manifest_path in enumerate(sorted(paths.source.glob("*.manifest.json"))):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest.setdefault("order", index)
+            rows.append(manifest)
+        return sorted(
+            rows,
+            key=lambda row: (
+                int(row.get("order", 0)),
+                natural_sort_key(str(row.get("chapter_id", ""))),
+            ),
+        )
+
+    def next_chapter_order(self, project_id: str, exclude_chapter_id: str | None = None) -> int:
+        orders = [
+            int(row.get("order", index))
+            for index, row in enumerate(self.load_chapter_manifests(project_id))
+            if row.get("chapter_id") != exclude_chapter_id
+        ]
+        return (max(orders) + 1) if orders else 0
 
     @staticmethod
     def safe_chapter_id(chapter_id: str) -> str:
@@ -388,12 +479,18 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                     project_id = parts[2]
                     if len(parts) == 4 and parts[3] == "chapters":
                         return self.send_json(app.save_chapter(project_id, body))
+                    if len(parts) == 4 and parts[3] == "rename":
+                        return self.send_json(app.rename_project(project_id, body))
+                    if len(parts) == 4 and parts[3] == "chapters-reorder":
+                        return self.send_json(app.reorder_chapters(project_id, body))
                     if len(parts) == 4 and parts[3] == "import":
                         return self.send_json(app.import_chapter(project_id, body))
                     if len(parts) == 4 and parts[3] == "bulk-import":
                         return self.send_json(app.bulk_import(project_id, body))
                     if len(parts) == 4 and parts[3] == "memory":
                         return self.send_json(app.save_memory(project_id, body))
+                    if len(parts) == 5 and parts[3] == "chapter-memory":
+                        return self.send_json(app.save_chapter_memory(project_id, parts[4], body))
                     if len(parts) == 5 and parts[3] == "annotations":
                         return self.send_json(app.save_annotations(project_id, parts[4], body))
                     if len(parts) == 5 and parts[3] == "annotated-text":

@@ -120,13 +120,23 @@ textarea:focus-visible {
   font-size: 13px;
 }
 
-.project-form {
+.icon-button {
+  margin-left: auto;
+  width: 38px;
+  padding: 0;
+  font-size: 18px;
+}
+
+.book-controls {
   display: grid;
-  grid-template-columns: 1fr 42px;
+  grid-template-columns: minmax(0, 1fr) 38px 38px;
   gap: 8px;
 }
 
-.project-form input,
+.book-controls .icon-button {
+  margin-left: 0;
+}
+
 .sidebar select {
   width: 100%;
   border: 1px solid #314941;
@@ -134,10 +144,6 @@ textarea:focus-visible {
   color: #f8fffc;
   border-radius: 6px;
   padding: 0 10px;
-}
-
-.project-form input::placeholder {
-  color: #9db2aa;
 }
 
 .field-label {
@@ -153,13 +159,96 @@ textarea:focus-visible {
 }
 
 .side-actions button,
-.project-form button {
+.book-controls button {
   border-color: #3c594f;
   background: #f2f7f4;
 }
 
+.toc-section {
+  min-height: 0;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toc-heading {
+  display: flex;
+  justify-content: space-between;
+  color: #b8ccc4;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.toc-list {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.toc-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 30px;
+  gap: 8px;
+  align-items: center;
+  min-height: 40px;
+  padding: 7px 8px;
+  border: 1px solid #274139;
+  border-radius: 6px;
+  background: #172c27;
+  color: #eef7f3;
+  cursor: grab;
+}
+
+.toc-add-row {
+  display: block;
+}
+
+.toc-add {
+  width: 100%;
+  border-color: #3c594f;
+  background: #f2f7f4;
+}
+
+.toc-item.active {
+  border-color: #d2b36c;
+  background: #24453d;
+}
+
+.toc-item.drag-over {
+  border-color: #fff8cf;
+}
+
+.toc-handle {
+  color: #9db2aa;
+  text-align: center;
+}
+
+.toc-title {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.toc-delete {
+  width: 30px;
+  min-height: 30px;
+  padding: 0;
+  background: transparent;
+}
+
 .status {
-  margin-top: auto;
   padding: 10px;
   border-radius: 6px;
   background: #0c1815;
@@ -221,6 +310,14 @@ textarea:focus-visible {
   height: 100vh;
 }
 
+.workspace.no-chapter {
+  grid-template-columns: 1fr;
+}
+
+.workspace.no-chapter .inspector-band {
+  display: none;
+}
+
 .editor-band,
 .inspector-band {
   min-width: 0;
@@ -232,6 +329,7 @@ textarea:focus-visible {
 .editor-band {
   border-right: 1px solid var(--line);
   background: #f5f7f2;
+  position: relative;
 }
 
 .toolbar {
@@ -242,6 +340,36 @@ textarea:focus-visible {
   padding: 14px;
   border-bottom: 1px solid var(--line);
   background: #ffffff;
+}
+
+.empty-editor {
+  display: none;
+  place-content: center;
+  gap: 8px;
+  flex: 1;
+  padding: 32px;
+  text-align: center;
+  background: #fffdfa;
+  color: var(--muted);
+}
+
+.empty-editor.active {
+  display: grid;
+}
+
+.empty-editor h2 {
+  margin: 0;
+  color: var(--ink);
+}
+
+.empty-editor p {
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.editor-band.no-chapter .toolbar,
+.editor-band.no-chapter .editor-view {
+  display: none;
 }
 
 .chapter-fields {
@@ -345,6 +473,12 @@ textarea {
   color: var(--muted);
 }
 
+.inline-annotation-item .ann-tags {
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+
 .empty-note {
   padding: 16px;
   border: 1px dashed var(--line);
@@ -411,15 +545,64 @@ textarea {
   text-transform: uppercase;
 }
 
+.panel-note {
+  margin: -4px 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 #plot-summary,
-#current-state {
+#current-state,
+#chapter-plot-summary,
+#chapter-current-state {
   width: 100%;
   min-height: 96px;
   resize: vertical;
 }
 
-#themes {
+#themes,
+#chapter-themes {
   width: 100%;
+}
+
+.chapter-memory-section[hidden] {
+  display: none;
+}
+
+.memory-scope {
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.book-memory-scope {
+  border-left: 4px solid var(--accent-2);
+}
+
+.chapter-memory-section {
+  border-left: 4px solid var(--gold);
+}
+
+.memory-scope-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.memory-scope-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.memory-scope-head span {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
 }
 
 .kv-list {
@@ -482,8 +665,19 @@ textarea {
 }
 
 .character-grid textarea {
+  grid-column: 1 / -1;
+}
+
+.character-grid textarea,
+.chapter-change-grid textarea {
   min-height: 76px;
   resize: vertical;
+}
+
+.chapter-change-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .annotation-list .item {
@@ -529,6 +723,43 @@ textarea {
   resize: vertical;
 }
 
+.modal {
+  width: min(420px, calc(100vw - 32px));
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: var(--shadow);
+}
+
+.modal::backdrop {
+  background: rgba(18, 34, 31, 0.35);
+}
+
+.modal-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+}
+
+.modal-head,
+.modal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal-head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modal-card label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
 @media (max-width: 1040px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -563,7 +794,7 @@ textarea {
     align-items: stretch;
   }
 
-  .project-form {
+  .book-controls {
     grid-template-columns: 1fr;
   }
 

@@ -24,25 +24,29 @@
             <h1>Narrator Studio</h1>
             <p id="project-meta">No book loaded</p>
           </div>
+          <button id="open-book-modal" class="icon-button" title="Add book">＋</button>
         </div>
 
-        <form id="project-form" class="project-form">
-          <input id="project-title" placeholder="Book title" autocomplete="off" />
-          <button type="submit" title="Create or open project">＋</button>
-        </form>
-
         <label class="field-label" for="project-select">Books</label>
-        <select id="project-select"></select>
-
-        <label class="field-label" for="chapter-select">Chapters</label>
-        <select id="chapter-select"></select>
+        <div class="book-controls">
+          <select id="project-select"></select>
+          <button id="rename-book" class="icon-button" title="Rename selected book">✎</button>
+          <button id="delete-book" class="icon-button danger" title="Delete selected book">🗑</button>
+        </div>
 
         <div class="side-actions">
-          <button id="new-chapter" title="New chapter">＋ Chapter</button>
+          <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
           <button id="run-analyze" title="Analyze story memory">Analyze</button>
           <button id="run-annotate" title="Annotate passages">Annotate</button>
           <button id="run-cast" title="Assign voices to characters and speakers">Cast Voices</button>
-          <button id="delete-book" class="danger" title="Delete the whole book project">Delete Book</button>
+        </div>
+
+        <div class="toc-section">
+          <div class="toc-heading">
+            <span>Contents</span>
+            <small id="toc-count">0</small>
+          </div>
+          <ol id="toc-list" class="toc-list"></ol>
         </div>
 
         <div class="status" id="status">Ready</div>
@@ -50,19 +54,20 @@
 
       <main class="workspace">
         <section class="editor-band">
+          <div id="empty-editor" class="empty-editor">
+            <h2>Select a chapter</h2>
+            <p>Choose a chapter from the table of contents to edit transcript text, annotations, and generated narration.</p>
+          </div>
           <div class="toolbar">
             <div class="chapter-fields">
               <input id="chapter-id" placeholder="chapter-id" />
               <input id="chapter-title" placeholder="Chapter title" />
             </div>
             <div class="toolbar-actions">
-              <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" hidden />
-              <input id="bulk-file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
-              <button id="import-file" title="Import document">⇧ Import</button>
-              <button id="bulk-import" title="Import selected chapters in filename order, then analyze">Bulk Import</button>
+              <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
+              <button id="import-file" title="Import one or more chapters">⇧ Import</button>
               <button id="save-chapter" title="Save transcript text and annotations">Save Transcript</button>
               <button id="reset-annotations" title="Remove annotations for this chapter">Reset Tags</button>
-              <button id="delete-chapter" class="danger" title="Delete this chapter">Delete Chapter</button>
               <button id="synthesize" title="Generate narration">▶ Generate</button>
               <select id="tts-backend" title="TTS backend">
                 <option value="script">Script</option>
@@ -89,28 +94,50 @@
 
           <div id="memory-panel" class="panel active">
             <div class="panel-heading">
-              <h2>Book Understanding</h2>
+              <h2>Understanding</h2>
               <button id="save-memory" title="Save memory">Save</button>
             </div>
-            <label>Plot summary</label>
-            <textarea id="plot-summary"></textarea>
-            <label>Current state</label>
-            <textarea id="current-state"></textarea>
-            <label>Themes</label>
-            <input id="themes" placeholder="theme, theme, theme" />
-            <label>Pronunciation notes</label>
-            <div id="pronunciation-list" class="kv-list"></div>
-            <button id="add-pronunciation" class="ghost">＋ Pronunciation</button>
+            <div class="memory-scope book-memory-scope">
+              <div class="memory-scope-head">
+                <h3>Book Memory</h3>
+                <span>Aggregate across analyzed chapters</span>
+              </div>
+              <label>Overall plot summary</label>
+              <textarea id="plot-summary"></textarea>
+              <label>Overall current state</label>
+              <textarea id="current-state"></textarea>
+              <label>Book themes</label>
+              <input id="themes" placeholder="theme, theme, theme" />
+              <label>Book pronunciation notes</label>
+              <div id="pronunciation-list" class="kv-list"></div>
+              <button id="add-pronunciation" class="ghost">＋ Pronunciation</button>
+            </div>
+            <div id="chapter-memory-section" class="memory-scope chapter-memory-section">
+              <div class="memory-scope-head">
+                <h3>Selected Chapter Memory</h3>
+                <span id="chapter-memory-label">No chapter selected</span>
+              </div>
+              <label>Plot during this chapter</label>
+              <textarea id="chapter-plot-summary"></textarea>
+              <label>State at this chapter's end</label>
+              <textarea id="chapter-current-state"></textarea>
+              <label>Chapter-specific themes</label>
+              <input id="chapter-themes" placeholder="theme, theme, theme" />
+              <label>Character changes during this chapter</label>
+              <div id="chapter-character-changes" class="item-list"></div>
+              <button id="add-chapter-change" class="ghost">＋ Character Change</button>
+            </div>
           </div>
 
-          <div id="characters-panel" class="panel">
-            <div class="panel-heading">
-              <h2>Characters</h2>
+            <div id="characters-panel" class="panel">
+              <div class="panel-heading">
+              <h2>Book Character Profiles</h2>
               <div class="cluster">
                 <button id="add-character" title="Add character">＋</button>
                 <button id="save-characters" title="Save characters">Save</button>
               </div>
             </div>
+            <p class="panel-note">Overall character profiles are for stable casting decisions. Chapter-specific personality shifts live in Selected Chapter Memory.</p>
             <div id="characters-list" class="item-list"></div>
           </div>
 
@@ -126,7 +153,6 @@
             <div class="panel-heading">
               <h2>Voices</h2>
               <div class="cluster">
-                <button id="load-elevenlabs" title="Load ElevenLabs voices">Load 11Labs</button>
                 <button id="add-cast" title="Add voice assignment">＋</button>
                 <button id="save-cast" title="Save voice cast">Save</button>
               </div>
@@ -138,6 +164,21 @@
       </main>
     </div>
 
-    <script src="/app.js?v=20260513-bulk-import"></script>
+    <dialog id="book-modal" class="modal">
+      <form id="project-form" class="modal-card">
+        <div class="modal-head">
+          <h2>Add Book</h2>
+          <button type="button" class="close-modal" title="Close">×</button>
+        </div>
+        <label for="project-title">Book title</label>
+        <input id="project-title" placeholder="Book title" autocomplete="off" />
+        <div class="modal-actions">
+          <button type="button" class="close-modal">Cancel</button>
+          <button id="create-book" type="submit">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="/app.js?v=20260513-auto-cast"></script>
   </body>
 </html>
