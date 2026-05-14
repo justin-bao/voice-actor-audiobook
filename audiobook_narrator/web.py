@@ -127,7 +127,8 @@ class NarratorWebApp:
             audio_path = paths.audio / f"{selected}.mp3"
             if manifest_path.exists() and audio_path.exists():
                 audio_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                audio_url = f"/api/projects/{project_id}/audio/{selected}"
+                mtime = int(audio_path.stat().st_mtime)
+                audio_url = f"/api/projects/{project_id}/audio/{selected}?v={mtime}"
         memory_path = paths.memory / "story.json"
         cast_path = paths.casts / "voices.json"
         return {
@@ -400,6 +401,35 @@ class NarratorWebApp:
             return {"ok": True, "ssml": ssml, "output": audio}
         raise ValueError(f"Unknown step: {step}")
 
+    def regenerate_chunk(self, project_id: str, chapter_id: str, chunk_index: int, backend: str) -> dict:
+        if backend != "elevenlabs":
+            raise ValueError("Block regeneration requires the elevenlabs backend.")
+        paths = self.store.paths(project_id)
+        manifest_path = paths.audio / f"{chapter_id}.parts.json"
+        if not manifest_path.exists():
+            raise ValueError(f"No audio manifest for chapter {chapter_id}. Run full synthesis first.")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if chunk_index < 0 or chunk_index >= len(manifest):
+            raise ValueError(f"Chunk {chunk_index} is out of range (0–{len(manifest) - 1}).")
+        chunk = manifest[chunk_index]
+        passage_indices = [p["index"] for p in chunk.get("passages", [])]
+        all_annotations = self.store.read_jsonl(paths.annotations / f"{chapter_id}.jsonl")
+        passages = [
+            Passage.model_validate(all_annotations[i])
+            for i in passage_indices
+            if i < len(all_annotations)
+        ]
+        cast = self.store.read_json(paths.casts / "voices.json", Cast)
+        provider = ElevenLabsTTSProvider()
+        provider.regenerate_chunk_audio(passages, speaker_voice_map(cast), Path(chunk["path"]))
+        combined_path = paths.audio / f"{chapter_id}.mp3"
+        with open(combined_path, "wb") as combined:
+            for c in manifest:
+                chunk_path = Path(c["path"])
+                if chunk_path.exists():
+                    combined.write(chunk_path.read_bytes())
+        return {"ok": True, "chunk_index": chunk_index}
+
     def elevenlabs_voices(self) -> dict:
         voices = ElevenLabsTTSProvider().list_voices()
         return {"voices": voices}
@@ -517,6 +547,12 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                         return self.send_json(app.save_cast(project_id, body))
                     if len(parts) == 4 and parts[3] == "run":
                         return self.send_json(app.run_step(project_id, body["step"], body.get("chapter_id"), body))
+                    if len(parts) == 6 and parts[3] == "audio" and parts[5] == "regenerate-chunk":
+                        return self.send_json(app.regenerate_chunk(
+                            project_id, parts[4],
+                            int(body.get("chunk_index", 0)),
+                            body.get("backend", "elevenlabs"),
+                        ))
                 raise ValueError("Unknown API route.")
             except Exception as exc:
                 return self.send_error_json(exc)

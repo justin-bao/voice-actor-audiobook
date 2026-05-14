@@ -481,6 +481,59 @@ textarea {
   align-items: center;
 }
 
+.annotation-header.has-audio {
+  grid-template-columns: minmax(110px, 1.2fr) minmax(96px, 0.8fr) minmax(118px, 0.9fr) minmax(82px, 0.7fr) 54px 32px;
+}
+
+.regen-chunk-btn {
+  padding: 0;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  border-radius: 6px;
+  border-color: var(--line);
+  background: #f5f5f2;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+
+.regen-chunk-btn:hover {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  background: #eef5ee;
+}
+
+.ann-tts-details {
+  margin-top: 2px;
+}
+
+.ann-tts-details summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 0;
+  user-select: none;
+}
+
+.ann-tts-text {
+  width: 100%;
+  min-height: 60px;
+  resize: vertical;
+  margin-top: 6px;
+  font-family: ui-serif, "Songti SC", "Noto Serif CJK SC", Georgia, serif;
+  font-size: 15px;
+  line-height: 1.7;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  background: #fffbf0;
+  padding: 8px 10px;
+}
+
 .annotation-script {
   display: grid;
   gap: 0;
@@ -915,6 +968,7 @@ button.armed {
   .chapter-fields,
   .character-grid,
   .annotation-header,
+  .annotation-header.has-audio,
   .annotation-grid,
   .cast-grid {
     grid-template-columns: 1fr;
@@ -1008,6 +1062,27 @@ button.armed {
 .audio-info {
   font-size: 11px;
   color: var(--muted);
+}
+
+.audio-regen-btn {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 6px;
+  border-color: var(--line);
+  background: #f0f5f1;
+  color: var(--muted);
+  font-size: 15px;
+  display: grid;
+  place-items: center;
+}
+
+.audio-regen-btn:hover {
+  border-color: var(--accent-2);
+  color: var(--accent-2);
+  background: #eef5ee;
 }
 
 /* Highlighted passage during playback */

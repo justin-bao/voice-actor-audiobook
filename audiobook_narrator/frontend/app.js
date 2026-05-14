@@ -26,6 +26,7 @@ let chapterAudio = null;
 let audioTimings = [];
 let activePassageIndex = -1;
 let userIsSeeking = false;
+let passageChunkMap = {};
 
 function playVoicePreview(voiceId) {
   const voice = state.elevenVoices.find((v) => v.voice_id === voiceId);
@@ -154,6 +155,9 @@ function initAudioPlayer() {
   const playBtn = $("audio-play-btn");
   if (playBtn) playBtn.addEventListener("click", toggleAudioPlay);
 
+  const regenBtn = $("audio-regen-btn");
+  if (regenBtn) regenBtn.addEventListener("click", () => runStep("synthesize"));
+
   const seekEl = $("audio-seek");
   if (seekEl) {
     seekEl.addEventListener("mousedown", () => { userIsSeeking = true; });
@@ -164,6 +168,33 @@ function initAudioPlayer() {
       const duration = chapterAudio?.duration || 0;
       if (chapterAudio) chapterAudio.currentTime = (Number(e.target.value) / 10000) * duration;
     });
+  }
+}
+
+function buildPassageChunkMap() {
+  passageChunkMap = {};
+  (state.audioManifest || []).forEach((chunk) => {
+    (chunk.passages || []).forEach((p) => {
+      passageChunkMap[p.index] = chunk.chunk_index;
+    });
+  });
+}
+
+async function regenerateChunk(chunkIndex) {
+  if (!state.project || !state.selectedChapterId) return;
+  setBusy(true, "Regenerating", `Re-synthesizing chunk ${chunkIndex}…`);
+  setStatus(`Regenerating chunk ${chunkIndex}…`);
+  try {
+    await api(
+      `/api/projects/${encodeURIComponent(state.project.project_id)}/audio/${encodeURIComponent(state.selectedChapterId)}/regenerate-chunk`,
+      { method: "POST", body: JSON.stringify({ chunk_index: chunkIndex, backend: "elevenlabs" }) }
+    );
+    await loadProject(state.project.project_id, state.selectedChapterId);
+    setStatus(`Chunk ${chunkIndex} regenerated`);
+  } catch (error) {
+    setStatus(`Regen failed: ${error.message}`);
+  } finally {
+    setBusy(false);
   }
 }
 
@@ -180,6 +211,7 @@ function renderAudioPlayer() {
     section.innerHTML = "";
     return;
   }
+  buildPassageChunkMap();
   const totalPassages = (state.audioManifest || []).reduce((n, c) => n + (c.passages?.length || 0), 0);
   const chunkCount = state.audioManifest.length;
   section.hidden = false;
@@ -193,6 +225,7 @@ function renderAudioPlayer() {
           <span class="audio-info">${totalPassages} passages · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""}</span>
         </div>
       </div>
+      <button id="audio-regen-btn" class="audio-regen-btn" title="Regenerate audio for entire chapter">↺</button>
     </div>
   `;
   initAudioPlayer();
@@ -430,20 +463,31 @@ function renderTranscript() {
 }
 
 function inlineAnnotationHtml(row, index) {
+  const chunkIndex = state.audioManifest != null ? (passageChunkMap[index] ?? -1) : -1;
+  const hasAudio = chunkIndex >= 0;
+  const regenBtn = hasAudio
+    ? `<button class="regen-chunk-btn" data-chunk="${chunkIndex}" title="Re-synthesize chunk ${chunkIndex}">↺</button>`
+    : "";
+  const ttsOpen = row.tts_text ? " open" : "";
   return `
     <article class="inline-annotation-item" data-index="${index}">
-      <div class="annotation-header">
+      <div class="annotation-header${hasAudio ? " has-audio" : ""}">
         <input class="ann-speaker" value="${escapeAttr(row.speaker || "Narrator")}" placeholder="speaker" />
         ${selectHtml("ann-emotion", emotions, row.emotion || "neutral")}
         ${selectHtml("ann-delivery", deliveries, row.delivery || "matter-of-fact")}
         ${selectHtml("ann-pace", paces, row.pace || "medium")}
         <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity 1–5" />
+        ${regenBtn}
       </div>
       <div class="annotation-script">
         <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
         <div class="script-pause">⏸ <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" /> ms</div>
       </div>
       <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
+      <details class="ann-tts-details"${ttsOpen}>
+        <summary>TTS override</summary>
+        <textarea class="ann-tts-text" placeholder="Text sent to TTS (leave blank to use passage text). Use for phonetic substitution: e.g. 汪淼(Wāng Miǎo) or full pinyin.">${escapeHtml(row.tts_text || "")}</textarea>
+      </details>
     </article>
   `;
 }
@@ -802,6 +846,7 @@ function collectAnnotations() {
       chapter_id: state.selectedChapterId,
       index,
       text: item.querySelector(".ann-text").value,
+      tts_text: item.querySelector(".ann-tts-text")?.value || "",
       speaker: item.querySelector(".ann-speaker").value || "Narrator",
       emotion: item.querySelector(".ann-emotion").value,
       delivery: item.querySelector(".ann-delivery").value,
@@ -1229,6 +1274,12 @@ function wireEvents() {
     const voiceId = btn.dataset.voiceId
       || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
     if (voiceId) playVoicePreview(voiceId);
+  });
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest(".regen-chunk-btn");
+    if (!btn) return;
+    event.stopPropagation();
+    regenerateChunk(Number(btn.dataset.chunk));
   });
   $("inline-annotations").addEventListener("click", (event) => {
     const tag = event.target.tagName;
