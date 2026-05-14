@@ -11,6 +11,22 @@ from audiobook_narrator.models import ChapterMemory, ProjectConfig, ProjectPaths
 T = TypeVar("T", bound=BaseModel)
 
 
+def list_source_chapter_paths(source_dir: Path) -> list[Path]:
+    paths = [p for p in source_dir.glob("*.txt") if not p.name.endswith(".annotated.txt")]
+
+    def sort_key(path: Path) -> tuple[int, str]:
+        manifest_path = source_dir / f"{path.stem}.manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                return int(manifest.get("order", 0)), path.name
+            except Exception:
+                return 0, path.name
+        return 0, path.name
+
+    return sorted(paths, key=sort_key)
+
+
 class ProjectStore:
     def __init__(self, base_dir: Path = Path("projects")) -> None:
         self.base_dir = base_dir

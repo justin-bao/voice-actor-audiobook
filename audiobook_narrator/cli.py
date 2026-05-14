@@ -81,7 +81,6 @@ def cmd_run(args: argparse.Namespace) -> None:
         store.create_project(args.project_id, args.title)
     manifest = ingest_chapter(store, args.project_id, args.input, args.chapter, args.chapter_id)
     update_story_memory(store, args.project_id, get_llm_provider(True))
-    annotate_project(store, args.project_id, get_llm_provider(True))
     build_cast(store, args.project_id)
     ssml_path, audio_path = synthesize_chapter(
         store,

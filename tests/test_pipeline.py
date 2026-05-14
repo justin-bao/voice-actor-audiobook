@@ -217,8 +217,8 @@ class PipelineTest(unittest.TestCase):
 
             memory = update_story_memory(store, "book", provider)
 
-            self.assertEqual(len(provider.users), 2)
-            self.assertIn("ch01 summary", provider.users[1])
+            self.assertEqual(len(provider.users), 4)
+            self.assertIn("ch01 summary", provider.users[2])
             self.assertEqual(memory.current_state, "ch02 state")
             self.assertEqual(store.load_chapter_memory("book", "ch01").plot_summary, "ch01 summary")
             self.assertEqual(store.load_chapter_memory("book", "ch02").plot_summary, "ch02 summary")
