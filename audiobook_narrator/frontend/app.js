@@ -17,6 +17,43 @@ const state = {
   autoSaving: false,
 };
 
+let previewAudio = null;
+let previewingVoiceId = null;
+
+function playVoicePreview(voiceId) {
+  const voice = state.elevenVoices.find((v) => v.voice_id === voiceId);
+  if (!voice?.preview_url) return;
+  if (previewingVoiceId === voiceId && previewAudio && !previewAudio.paused) {
+    previewAudio.pause();
+    previewAudio.currentTime = 0;
+    previewingVoiceId = null;
+    updatePreviewButtons();
+    return;
+  }
+  if (previewAudio) {
+    previewAudio.pause();
+    previewAudio.currentTime = 0;
+  }
+  previewAudio = new Audio(voice.preview_url);
+  previewingVoiceId = voiceId;
+  previewAudio.addEventListener("ended", () => {
+    previewingVoiceId = null;
+    updatePreviewButtons();
+  });
+  previewAudio.play();
+  updatePreviewButtons();
+}
+
+function updatePreviewButtons() {
+  document.querySelectorAll(".voice-preview-btn").forEach((btn) => {
+    const voiceId = btn.dataset.voiceId
+      || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
+    const isPlaying = !!voiceId && voiceId === previewingVoiceId;
+    btn.textContent = isPlaying ? "⏸" : "▶";
+    btn.classList.toggle("playing", isPlaying);
+  });
+}
+
 const $ = (id) => document.getElementById(id);
 
 const emotions = ["neutral", "tense", "fearful", "angry", "tender", "grief", "wonder", "comic", "solemn", "urgent"];
@@ -328,13 +365,19 @@ function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-v
   const current = selectedVoiceId && !selectedExists
     ? `<option value="${escapeAttr(selectedVoiceId)}" selected>${escapeHtml(selectedVoiceId)}</option>`
     : "";
-  return `<select class="${className}"><option value="">Select ElevenLabs voice...</option>${current}${options}</select>`;
+  const select = `<select class="${className}"><option value="">Select ElevenLabs voice...</option>${current}${options}</select>`;
+  return `<div class="voice-select-wrap">${select}<button class="voice-preview-btn" title="Preview selected voice">▶</button></div>`;
 }
 
 function renderElevenVoices() {
   $("voice-library").innerHTML = state.elevenVoices
     .slice(0, 40)
-    .map((voice) => `<button class="voice-pill" data-voice-id="${escapeAttr(voice.voice_id)}">${escapeHtml(voice.name || voice.voice_id)}</button>`)
+    .map((voice) => {
+      const previewBtn = voice.preview_url
+        ? `<button class="voice-preview-btn" data-voice-id="${escapeAttr(voice.voice_id)}" title="Preview voice">▶</button>`
+        : "";
+      return `<span class="voice-pill-group"><button class="voice-pill" data-voice-id="${escapeAttr(voice.voice_id)}" title="Copy voice ID">${escapeHtml(voice.name || voice.voice_id)}</button>${previewBtn}</span>`;
+    })
     .join("");
 }
 
@@ -966,6 +1009,14 @@ function wireEvents() {
     if (!event.target.matches(".voice-pill")) return;
     navigator.clipboard?.writeText(event.target.dataset.voiceId);
     setStatus(`Copied ${event.target.dataset.voiceId}`);
+  });
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest(".voice-preview-btn");
+    if (!btn) return;
+    event.stopPropagation();
+    const voiceId = btn.dataset.voiceId
+      || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
+    if (voiceId) playVoicePreview(voiceId);
   });
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {

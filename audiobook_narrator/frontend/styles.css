@@ -776,12 +776,67 @@ button.armed {
   margin-bottom: 14px;
 }
 
-.voice-pill {
+.voice-pill-group {
+  display: inline-flex;
+  align-items: stretch;
   border: 1px solid #d4c090;
   border-radius: 999px;
   background: #fff8e8;
-  padding: 6px 10px;
+  overflow: hidden;
+}
+
+.voice-pill {
+  border: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 5px 9px 5px 11px;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.voice-pill:hover {
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.voice-preview-btn {
+  border: none;
+  border-left: 1px solid #e8d8a0;
+  border-radius: 0;
+  background: transparent;
+  padding: 4px 9px;
+  font-size: 11px;
+  color: #8a7040;
+  cursor: pointer;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.voice-preview-btn:hover {
+  background: #f5eed8;
+  color: var(--accent-2);
+}
+
+.voice-preview-btn.playing {
+  color: var(--accent-2);
+  background: #eef5e8;
+}
+
+.voice-select-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.voice-select-wrap select {
+  flex: 1;
+  min-width: 0;
+}
+
+.voice-select-wrap .voice-preview-btn {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 5px 9px;
+  font-size: 13px;
 }
 
 .cast-grid {
