@@ -5,7 +5,7 @@ import re
 
 from audiobook_narrator.analyze import source_chapter_paths
 from audiobook_narrator.audio_tags import allowed_audio_tags_prompt, audio_tags_for_passage, normalize_audio_tags
-from audiobook_narrator.models import Delivery, Emotion, Passage, StoryMemory
+from audiobook_narrator.models import ChapterMemory, Delivery, Emotion, Passage, StoryMemory
 from audiobook_narrator.providers import LLMProvider
 from audiobook_narrator.storage import ProjectStore
 from audiobook_narrator.textsplit import extract_dialogue_text, is_dialogue, split_passages
@@ -16,6 +16,12 @@ logger = logging.getLogger(__name__)
 ANNOTATE_SYSTEM_PROMPT = """You are an audiobook director for Mandarin Chinese fiction.
 Use ElevenLabs v3 audio tags as the primary performance direction. Only use tags from this allowlist:
 __ALLOWED_AUDIO_TAGS__
+
+You will receive two memory inputs:
+- Book memory: cumulative facts — character biographies, stable personalities, established relationships, overall plot context.
+- Chapter memory: episodic state — how characters feel and behave specifically in this chapter, emotional and mood shifts, narrative atmosphere at this point in the story.
+
+Prioritize chapter memory for moment-to-moment performance direction. Use book memory for stable character voice and identity.
 
 Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index and contain:
 {
@@ -29,8 +35,11 @@ Return strict JSON with a "passages" array. Each passage must preserve the numbe
 }
 Do not rewrite the text. Do not invent tags outside the allowlist. Use the exact chunk_index values supplied."""
 
-ANNOTATE_USER_TEMPLATE = """Story memory:
+ANNOTATE_USER_TEMPLATE = """Book memory (cumulative facts, character bios, story context up to this chapter):
 {memory_json}
+
+Chapter memory (this chapter's narrative atmosphere, emotional shifts, character states):
+{chapter_memory_json}
 
 Annotate these chunks:
 {chunks}"""
@@ -53,32 +62,43 @@ def annotate_project(store: ProjectStore, project_id: str, provider: LLMProvider
     for source_path in source_chapter_paths(paths.source):
         chapter_id = source_path.stem
         text = source_path.read_text(encoding="utf-8")
-        passages = annotate_chapter(chapter_id, text, memory, provider)
+        chapter_memory = store.load_chapter_memory(project_id, chapter_id)
+        passages = annotate_chapter(chapter_id, text, memory, provider, chapter_memory=chapter_memory)
         store.write_jsonl(paths.annotations / f"{chapter_id}.jsonl", passages)
         annotated[chapter_id] = passages
     return annotated
 
 
 def annotate_chapter(
-    chapter_id: str, text: str, memory: StoryMemory, provider: LLMProvider
+    chapter_id: str,
+    text: str,
+    memory: StoryMemory,
+    provider: LLMProvider,
+    chapter_memory: ChapterMemory | None = None,
 ) -> list[Passage]:
     chunks = split_passages(text)
     if provider.__class__.__name__ != "HeuristicLLMProvider":
-        llm_rows = try_llm_annotation(chapter_id, chunks, memory, provider)
+        llm_rows = try_llm_annotation(chapter_id, chunks, memory, provider, chapter_memory=chapter_memory)
         if llm_rows:
             return llm_rows
     return [heuristic_passage(chapter_id, index, chunk, memory) for index, chunk in enumerate(chunks)]
 
 
 def try_llm_annotation(
-    chapter_id: str, chunks: list[str], memory: StoryMemory, provider: LLMProvider
+    chapter_id: str,
+    chunks: list[str],
+    memory: StoryMemory,
+    provider: LLMProvider,
+    chapter_memory: ChapterMemory | None = None,
 ) -> list[Passage]:
     if not chunks:
         return []
+    chapter_memory_json = chapter_memory.model_dump_json(exclude_none=True) if chapter_memory else "{}"
     payload = provider.complete_json(
         ANNOTATE_SYSTEM_PROMPT.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
         ANNOTATE_USER_TEMPLATE.format(
             memory_json=memory.model_dump_json(exclude_none=True),
+            chapter_memory_json=chapter_memory_json,
             chunks="\n".join(f"{i}: {chunk}" for i, chunk in enumerate(chunks)),
         ),
     )
