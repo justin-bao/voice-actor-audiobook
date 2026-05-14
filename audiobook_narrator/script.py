@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 from pathlib import Path
 
+from audiobook_narrator.audio_tags import strip_inline_tags
 from audiobook_narrator.models import Cast, Passage
 
 
@@ -18,7 +19,7 @@ def render_ssml(passages: list[Passage], cast: Cast, output_path: Path) -> Path:
         body.append(f'  <voice name="{html.escape(provider_voice)}">')
         body.append(
             f'    <prosody rate="{rate}" pitch="{pitch}" volume="medium">'
-            f"{html.escape(passage.text)}</prosody>"
+            f"{html.escape(strip_inline_tags(passage.text))}</prosody>"
         )
         body.append(f'    <break time="{passage.pause_after_ms}ms"/>')
         body.append("  </voice>")

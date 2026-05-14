@@ -474,30 +474,65 @@ textarea {
   box-shadow: 0 8px 22px rgba(18, 34, 31, 0.06);
 }
 
-.annotation-meta-row {
+.annotation-header {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) minmax(96px, 0.8fr) minmax(118px, 0.9fr) minmax(82px, 0.7fr) 66px 82px;
+  grid-template-columns: minmax(110px, 1.2fr) minmax(96px, 0.8fr) minmax(118px, 0.9fr) minmax(82px, 0.7fr) 54px;
   gap: 8px;
   align-items: center;
 }
 
+.annotation-script {
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #fdfcf8;
+}
+
 .inline-annotation-item .ann-text {
   width: 100%;
-  min-height: 92px;
+  min-height: 88px;
   resize: vertical;
   font-family: ui-serif, "Songti SC", "Noto Serif CJK SC", Georgia, serif;
   font-size: 18px;
   line-height: 1.8;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 12px;
+  box-shadow: none;
+  outline: none;
+}
+
+.inline-annotation-item .ann-text:focus {
+  background: #fffef8;
+}
+
+.script-pause {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--line);
+  background: #f5f2ea;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.script-pause input {
+  width: 68px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: #fff;
 }
 
 .inline-annotation-item .ann-rationale {
   width: 100%;
   color: var(--muted);
-}
-
-.inline-annotation-item .ann-tags {
-  width: 100%;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-style: italic;
   font-size: 13px;
 }
 
@@ -824,7 +859,7 @@ button.armed {
   .toolbar-actions,
   .chapter-fields,
   .character-grid,
-  .annotation-meta-row,
+  .annotation-header,
   .annotation-grid,
   .cast-grid {
     grid-template-columns: 1fr;

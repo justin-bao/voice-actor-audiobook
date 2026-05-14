@@ -15,7 +15,7 @@ from typing import Iterator, Protocol
 
 from dotenv import load_dotenv
 
-from audiobook_narrator.audio_tags import audio_tags_for_passage
+from audiobook_narrator.audio_tags import audio_tags_for_passage, extract_inline_tags
 from audiobook_narrator.models import JsonDict, Passage
 
 load_dotenv()
@@ -396,8 +396,14 @@ class ElevenLabsTTSProvider:
         for passage in passages:
             voice_id = self.voice_id_for(passage.speaker, voice_by_speaker)
             text = passage.text.strip()
-            audio_tags = audio_tags_for_passage(passage)
-            tagged_text = " ".join(audio_tags + [text]).strip()
+            if extract_inline_tags(text):
+                # Tags already embedded at specific positions by the annotation step
+                tagged_text = text
+                audio_tags = extract_inline_tags(text)
+            else:
+                # Heuristic/legacy path: prepend passage-level tags to the front
+                audio_tags = audio_tags_for_passage(passage)
+                tagged_text = " ".join(audio_tags + [text]).strip()
             would_exceed_chars = char_count + len(tagged_text) > self.MAX_DIALOGUE_CHARS
             would_exceed_voices = voice_id not in voices and len(voices) >= self.MAX_UNIQUE_VOICES
             if inputs and (would_exceed_chars or would_exceed_voices):
