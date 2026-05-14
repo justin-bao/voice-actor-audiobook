@@ -490,24 +490,6 @@ textarea {
   background: #fdfcf8;
 }
 
-.inline-annotation-item .ann-tags {
-  width: 100%;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 13px;
-  border: none;
-  border-bottom: 1px solid var(--line);
-  border-radius: 0;
-  background: #f5f2ea;
-  padding: 6px 10px;
-  box-shadow: none;
-  outline: none;
-  color: var(--accent-2);
-}
-
-.inline-annotation-item .ann-tags:focus {
-  background: #edeae0;
-}
-
 .inline-annotation-item .ann-text {
   width: 100%;
   min-height: 88px;

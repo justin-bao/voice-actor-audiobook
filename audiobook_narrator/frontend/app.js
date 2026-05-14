@@ -23,6 +23,10 @@ const emotions = ["neutral", "tense", "fearful", "angry", "tender", "grief", "wo
 const deliveries = ["matter-of-fact", "dramatic", "intimate", "reflective", "clipped", "lyrical", "conversational", "suspenseful"];
 const paces = ["slow", "medium", "quick"];
 
+function extractInlineTags(text) {
+  return (text.match(/\[[a-z ]+\]/gi) || []);
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
@@ -252,7 +256,6 @@ function inlineAnnotationHtml(row, index) {
         <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity 1–5" />
       </div>
       <div class="annotation-script">
-        <input class="ann-tags" value="${escapeAttr((row.audio_tags || []).join(", "))}" placeholder="[tense], [whispers]" />
         <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
         <div class="script-pause">⏸ <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" /> ms</div>
       </div>
@@ -274,7 +277,6 @@ function buildEmbeddedAnnotationText(annotations) {
       `pace=${row.pace || "medium"}`,
       `intensity=${Number(row.intensity || 3)}`,
       `pause_ms=${Number(row.pause_after_ms || 350)}`,
-      `tags=${(row.audio_tags || []).join(",")}`,
     ];
     lines.push(`[[${meta.join(" | ")}]]`);
     if (row.rationale) lines.push(`// ${row.rationale}`);
@@ -551,7 +553,7 @@ function collectAnnotations() {
       pace: item.querySelector(".ann-pace").value,
       intensity: Number(item.querySelector(".ann-intensity").value || 3),
       pause_after_ms: Number(item.querySelector(".ann-pause").value || 350),
-      audio_tags: item.querySelector(".ann-tags").value.split(",").map((tag) => tag.trim()).filter(Boolean),
+      audio_tags: extractInlineTags(item.querySelector(".ann-text").value),
       rationale: item.querySelector(".ann-rationale").value,
       pronunciation_hints: original.pronunciation_hints || {},
     });

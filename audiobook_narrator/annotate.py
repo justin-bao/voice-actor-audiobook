@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 
-from audiobook_narrator.audio_tags import allowed_audio_tags_prompt, audio_tags_for_passage, normalize_audio_tags
+from audiobook_narrator.audio_tags import allowed_audio_tags_prompt, audio_tags_for_passage, extract_inline_tags, normalize_audio_tags
 from audiobook_narrator.models import ChapterMemory, Delivery, Emotion, Passage, StoryMemory
 from audiobook_narrator.providers import LLMProvider
 from audiobook_narrator.storage import ProjectStore, list_source_chapter_paths
@@ -23,17 +23,22 @@ You will receive three memory inputs:
 
 Use book memory for stable character voice identity. Use previous chapter state to set the opening tone and continuity. Use this chapter's episodic memory for moment-to-moment performance direction.
 
+Embed audio tags INLINE in the text at the exact position where the performance direction takes effect. This lets emotion and delivery change mid-passage. Examples:
+  "她先是沉默，然后[whispers] 低声说：'我知道了。'"
+  "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
+  "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
+
 Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index and contain:
 {
   "chunk_index": 0,
   "speaker": "Narrator or character name",
-  "audio_tags": ["[tense]", "[whispers]"],
+  "text": "original text with [tag] markers embedded at the positions where they apply",
   "pace": "slow|medium|quick",
   "intensity": 1-5,
   "pause_after_ms": integer,
   "rationale": "specific performance note tied to this passage"
 }
-Do not rewrite the text. Do not invent tags outside the allowlist. Use the exact chunk_index values supplied."""
+Only insert tags from the allowlist. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
 
 ANNOTATE_USER_TEMPLATE = """Book memory (cumulative facts, character bios, story context):
 {memory_json}
@@ -172,24 +177,30 @@ def try_llm_annotation(
 def passage_from_llm_row(
     chapter_id: str, index: int, text: str, row: dict, audio_tags: list[str]
 ) -> Passage:
+    # Prefer tagged text returned by the LLM; fall back to original chunk text
+    row_text = str(row.get("text") or "").strip()
+    tagged_text = row_text if row_text else text
+    # Derive audio_tags from inline tags embedded in the text, or from the explicit list
+    inline_tags = extract_inline_tags(tagged_text)
+    resolved_tags = inline_tags if inline_tags else audio_tags
     emotion = normalize_emotion(row.get("emotion"))
     delivery = normalize_delivery(row.get("delivery"))
     if not row.get("emotion"):
-        emotion = emotion_from_audio_tags(audio_tags)
+        emotion = emotion_from_audio_tags(resolved_tags)
     if not row.get("delivery"):
-        delivery = delivery_from_audio_tags(audio_tags)
+        delivery = delivery_from_audio_tags(resolved_tags)
     return Passage(
         passage_id=f"{chapter_id}-{index:04d}",
         chapter_id=chapter_id,
         index=index,
-        text=text,
+        text=tagged_text,
         speaker=normalize_speaker(row),
         emotion=emotion,
         delivery=delivery,
         pace=normalize_pace(row.get("pace")),
         intensity=normalize_intensity(row.get("intensity")),
         pause_after_ms=normalize_pause(row.get("pause_after_ms")),
-        audio_tags=audio_tags,
+        audio_tags=resolved_tags,
         rationale=str(
             row.get("rationale")
             or row.get("performance_note")

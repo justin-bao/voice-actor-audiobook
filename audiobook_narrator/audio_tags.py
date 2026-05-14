@@ -86,6 +86,19 @@ def normalize_audio_tags(value: object, *, max_tags: int = 3) -> list[str]:
     return normalized
 
 
+def extract_inline_tags(text: str) -> list[str]:
+    """Extract and normalize ElevenLabs audio tags embedded inline in text."""
+    return normalize_audio_tags(TAG_RE.findall(text))
+
+
+def strip_inline_tags(text: str) -> str:
+    """Remove recognized ElevenLabs audio tags from text, collapsing extra spaces."""
+    def _replace(m: re.Match) -> str:
+        tag = m.group(1).strip().lower()
+        return "" if tag in ELEVENLABS_AUDIO_TAGS else m.group(0)
+    return re.sub(r" {2,}", " ", TAG_RE.sub(_replace, text)).strip()
+
+
 def audio_tags_for_passage(passage: Passage) -> list[str]:
     explicit_tags = normalize_audio_tags(passage.audio_tags)
     if explicit_tags:
