@@ -42,6 +42,40 @@ Return strict JSON with a "passages" array. Each passage must preserve the numbe
 }
 Only insert tags from the allowlist and pinyin guides. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
 
+ANNOTATE_SYSTEM_PROMPT_SINGLE_NARRATOR = """You are an audiobook director for Mandarin Chinese fiction. A SINGLE narrator voice performs the entire book — there is no voice switching between characters.
+Use ElevenLabs v3 audio tags as the primary performance direction. Only use tags from this allowlist:
+__ALLOWED_AUDIO_TAGS__
+
+You will receive three memory inputs:
+- Book memory: cumulative facts — character biographies, stable personalities, established relationships, overall plot context.
+- Previous chapter state: the emotional and narrative handoff — where characters were left and the atmosphere at the end of the prior chapter.
+- This chapter's episodic memory: atmosphere, emotional arcs, vocal quality per character, and key dramatic beats specific to this chapter.
+
+The narrator differentiates characters through subtle shifts in delivery, pace, register, and audio tags — NOT by switching voices. For dialogue:
+- Commanding/authoritative characters: slightly lower register, measured pace, [serious] or [authoritative] tone
+- Young or curious characters: lighter, quicker delivery, [curious] or [excited]
+- Emotional moments: lean into [crying], [whispers], [tense], [fearful] etc.
+- Narrator prose: clear, even, neutral delivery
+
+Embed audio tags INLINE in the text at the exact position where the performance direction takes effect. Examples:
+  "她先是沉默，然后[whispers] 低声说：'我知道了。'"
+  "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
+  "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
+
+PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the pinyin guide in parentheses at its FIRST occurrence in each passage. Format: 汪淼(Wāng Miǎo). Do not add pinyin for common everyday words; only for terms explicitly listed in pronunciation_notes.
+
+Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index. Set speaker to "Narrator" for all passages — the single narrator voice performs everything.
+{
+  "chunk_index": 0,
+  "speaker": "Narrator",
+  "text": "original text with [tag] markers and pronunciation guides embedded",
+  "pace": "slow|medium|quick",
+  "intensity": 1-5,
+  "pause_after_ms": integer,
+  "rationale": "specific delivery note — which character register shift or emotional beat to convey"
+}
+Only insert tags from the allowlist and pinyin guides. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
+
 ANNOTATE_USER_TEMPLATE = """Book memory (cumulative facts, character bios, story context):
 {memory_json}
 
@@ -65,7 +99,12 @@ EMOTION_MARKERS: list[tuple[Emotion, list[str]]] = [
 ]
 
 
-def annotate_project(store: ProjectStore, project_id: str, provider: LLMProvider) -> dict[str, list[Passage]]:
+def annotate_project(
+    store: ProjectStore,
+    project_id: str,
+    provider: LLMProvider,
+    narration_mode: str = "multi_voice",
+) -> dict[str, list[Passage]]:
     paths = store.paths(project_id)
     memory = store.load_memory(project_id)
     annotated: dict[str, list[Passage]] = {}
@@ -78,6 +117,7 @@ def annotate_project(store: ProjectStore, project_id: str, provider: LLMProvider
             chapter_id, text, memory, provider,
             chapter_memory=chapter_memory,
             prev_chapter_memory=prev_chapter_memory,
+            narration_mode=narration_mode,
         )
         store.write_jsonl(paths.annotations / f"{chapter_id}.jsonl", passages)
         annotated[chapter_id] = passages
@@ -92,6 +132,7 @@ def annotate_chapter(
     provider: LLMProvider,
     chapter_memory: ChapterMemory | None = None,
     prev_chapter_memory: ChapterMemory | None = None,
+    narration_mode: str = "multi_voice",
 ) -> list[Passage]:
     chunks = split_passages(text)
     if provider.__class__.__name__ != "HeuristicLLMProvider":
@@ -99,6 +140,7 @@ def annotate_chapter(
             chapter_id, chunks, memory, provider,
             chapter_memory=chapter_memory,
             prev_chapter_memory=prev_chapter_memory,
+            narration_mode=narration_mode,
         )
         if llm_rows:
             return llm_rows
@@ -112,13 +154,19 @@ def try_llm_annotation(
     provider: LLMProvider,
     chapter_memory: ChapterMemory | None = None,
     prev_chapter_memory: ChapterMemory | None = None,
+    narration_mode: str = "multi_voice",
 ) -> list[Passage]:
     if not chunks:
         return []
     chapter_memory_json = chapter_memory.model_dump_json(exclude_none=True) if chapter_memory else "{}"
     prev_chapter_memory_json = prev_chapter_memory.model_dump_json(exclude_none=True) if prev_chapter_memory else "{}"
+    base_prompt = (
+        ANNOTATE_SYSTEM_PROMPT_SINGLE_NARRATOR
+        if narration_mode == "single_narrator"
+        else ANNOTATE_SYSTEM_PROMPT
+    )
     payload = provider.complete_json(
-        ANNOTATE_SYSTEM_PROMPT.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
+        base_prompt.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
         ANNOTATE_USER_TEMPLATE.format(
             memory_json=memory.model_dump_json(exclude_none=True),
             prev_chapter_memory_json=prev_chapter_memory_json,

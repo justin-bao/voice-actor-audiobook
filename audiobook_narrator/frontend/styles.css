@@ -162,6 +162,25 @@ textarea:focus-visible {
   grid-column: 1 / -1;
 }
 
+.mode-label {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: #7a9e8e;
+  margin-top: 4px;
+  margin-bottom: -4px;
+}
+
+#narration-mode {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  border: 1px solid #3c594f;
+  border-radius: 6px;
+  background: #f2f7f4;
+  padding: 4px 8px;
+  color: #1a3a2a;
+  cursor: pointer;
+}
+
 .side-actions button,
 .book-controls button {
   border-color: #3c594f;

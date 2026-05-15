@@ -87,7 +87,12 @@ Chapter text:
 {text}"""
 
 
-def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvider) -> StoryMemory:
+def update_story_memory(
+    store: ProjectStore,
+    project_id: str,
+    provider: LLMProvider,
+    narration_mode: str = "multi_voice",
+) -> StoryMemory:
     paths = store.paths(project_id)
     memory = store.load_memory(project_id)
     provider_is_heuristic = provider.__class__.__name__ == "HeuristicLLMProvider"
@@ -135,6 +140,7 @@ def update_story_memory(store: ProjectStore, project_id: str, provider: LLMProvi
             chapter_id, text, memory, provider,
             chapter_memory=chapter_memory,
             prev_chapter_memory=prev_chapter_memory,
+            narration_mode=narration_mode,
         )
         store.write_jsonl(paths.annotations / f"{chapter_id}.jsonl", passages)
         prev_chapter_memory = chapter_memory

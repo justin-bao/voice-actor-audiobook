@@ -224,6 +224,17 @@ class NarratorWebApp:
             result["llm"] = provider_summary(provider)
         return result
 
+    def update_config(self, project_id: str, body: dict) -> dict:
+        project_id = self.safe_project_id(project_id)
+        config = self.store.load_config(project_id)
+        if "narration_mode" in body:
+            mode = str(body["narration_mode"]).strip()
+            if mode not in {"multi_voice", "single_narrator"}:
+                raise ValueError(f"Invalid narration_mode: {mode!r}")
+            config.narration_mode = mode
+        self.store.write_json(self.store.paths(project_id).root / "project.json", config)
+        return {"ok": True, "config": config.model_dump(mode="json")}
+
     def save_memory(self, project_id: str, body: dict) -> dict:
         memory = StoryMemory.model_validate(body)
         self.store.save_memory(project_id, memory)
@@ -323,15 +334,17 @@ class NarratorWebApp:
         return {"ok": True, "cast": cast.model_dump(mode="json")}
 
     def run_step(self, project_id: str, step: str, chapter_id: str | None, body: dict) -> dict:
+        config = self.store.load_config(project_id)
+        narration_mode = config.narration_mode
         if step == "analyze":
             provider = get_llm_provider(not body.get("no_openai"))
-            logger.info("Web step=analyze project=%s llm=%s", project_id, provider_summary(provider))
+            logger.info("Web step=analyze project=%s llm=%s mode=%s", project_id, provider_summary(provider), narration_mode)
             with langfuse_observation(
                 "audiobook-analyze",
                 input={"project_id": project_id},
-                metadata={"step": "analyze", "llm": provider_summary(provider)},
+                metadata={"step": "analyze", "llm": provider_summary(provider), "narration_mode": narration_mode},
             ) as observation:
-                memory = update_story_memory(self.store, project_id, provider)
+                memory = update_story_memory(self.store, project_id, provider, narration_mode=narration_mode)
                 update_langfuse_observation(
                     observation,
                     output={
@@ -344,20 +357,20 @@ class NarratorWebApp:
             return {"ok": True, "memory": memory.model_dump(mode="json"), "llm": provider_summary(provider)}
         if step == "annotate":
             provider = get_llm_provider(not body.get("no_openai"))
-            logger.info("Web step=annotate project=%s llm=%s", project_id, provider_summary(provider))
+            logger.info("Web step=annotate project=%s llm=%s mode=%s", project_id, provider_summary(provider), narration_mode)
             with langfuse_observation(
                 "audiobook-annotate",
                 input={"project_id": project_id},
-                metadata={"step": "annotate", "llm": provider_summary(provider)},
+                metadata={"step": "annotate", "llm": provider_summary(provider), "narration_mode": narration_mode},
             ) as observation:
-                annotated = annotate_project(self.store, project_id, provider)
+                annotated = annotate_project(self.store, project_id, provider, narration_mode=narration_mode)
                 update_langfuse_observation(
                     observation,
                     output={"chapters": {key: len(value) for key, value in annotated.items()}},
                 )
                 passages = [passage for rows in annotated.values() for passage in rows]
                 score_langfuse_current_trace(evaluate_annotations(passages))
-                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
+                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider, narration_mode=narration_mode)
             flush_langfuse()
             return {
                 "ok": True,
@@ -366,7 +379,8 @@ class NarratorWebApp:
                 "llm": provider_summary(provider),
             }
         if step == "cast":
-            cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
+            provider = get_llm_provider(not body.get("no_openai"))
+            cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider, narration_mode=narration_mode)
             with langfuse_observation(
                 "audiobook-cast",
                 input={"project_id": project_id},
@@ -529,6 +543,8 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                         return self.send_json(app.import_chapter(project_id, body))
                     if len(parts) == 4 and parts[3] == "bulk-import":
                         return self.send_json(app.bulk_import(project_id, body))
+                    if len(parts) == 4 and parts[3] == "config":
+                        return self.send_json(app.update_config(project_id, body))
                     if len(parts) == 4 and parts[3] == "memory":
                         return self.send_json(app.save_memory(project_id, body))
                     if len(parts) == 5 and parts[3] == "chapter-memory":

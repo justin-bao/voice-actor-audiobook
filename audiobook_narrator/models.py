@@ -36,6 +36,7 @@ class ProjectConfig(BaseModel):
     project_id: str
     title: str
     language: str = "zh"
+    narration_mode: str = "multi_voice"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
