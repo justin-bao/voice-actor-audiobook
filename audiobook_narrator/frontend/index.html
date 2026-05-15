@@ -37,6 +37,11 @@
         <div class="side-actions">
           <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
           <button id="run-pipeline" title="Analyze story memory, annotate passages, and assign voices">Analyze + Annotate + Cast</button>
+          <label class="mode-label" for="narration-mode">Narration mode</label>
+          <select id="narration-mode" title="Single narrator performs all voices; or assign a distinct voice per character">
+            <option value="multi_voice">Multi-voice cast</option>
+            <option value="single_narrator">Single narrator</option>
+          </select>
         </div>
 
         <div class="toc-section">

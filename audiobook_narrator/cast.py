@@ -80,11 +80,37 @@ DEFAULT_VOICES = {
 }
 
 
+CAST_SINGLE_NARRATOR_SYSTEM_PROMPT = """You are a voice casting director for a Mandarin Chinese audiobook.
+
+This book uses a SINGLE narrator voice for the entire book. Your job is to select the one best voice from the catalog to perform all characters.
+
+Choose the voice that is:
+- The most versatile, expressive, and emotionally flexible
+- Clear and warm — suited for long-form literary narration
+- Capable of subtle tonal shifts to suggest different characters without switching voice
+- Preferably with Chinese or Mandarin training (accent: Chinese, or description/use_case mentions Chinese/Mandarin)
+
+Return strict JSON:
+{
+  "narrator_voice_id": "voice_id of the single chosen voice",
+  "reason": "one-sentence rationale for why this voice suits single-narrator delivery of this book"
+}
+
+Use only a voice_id that appears in the provided catalog."""
+
+CAST_SINGLE_NARRATOR_USER_TEMPLATE = """Book title and characters:
+{characters_json}
+
+Available voices:
+{voices_json}"""
+
+
 def build_cast(
     store: ProjectStore,
     project_id: str,
     elevenlabs_voices: list[dict] | None = None,
     provider: LLMProvider | None = None,
+    narration_mode: str = "multi_voice",
 ) -> Cast:
     memory = store.load_memory(project_id)
     existing: Cast | None = None
@@ -94,7 +120,17 @@ def build_cast(
     if elevenlabs_voices is None:
         elevenlabs_voices = load_elevenlabs_voices_if_configured()
 
-    if provider is not None and not isinstance(provider, _HeuristicSentinel) and elevenlabs_voices:
+    if narration_mode == "single_narrator":
+        if provider is not None and not isinstance(provider, _HeuristicSentinel) and elevenlabs_voices:
+            try:
+                logger.info("Cast provider=llm mode=single_narrator voices=%d", len(elevenlabs_voices))
+                cast = llm_single_narrator_cast(memory, provider, elevenlabs_voices, existing)
+            except Exception as exc:
+                logger.warning("LLM single-narrator cast failed, falling back to heuristic: %s", exc)
+                cast = single_narrator_cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+        else:
+            cast = single_narrator_cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+    elif provider is not None and not isinstance(provider, _HeuristicSentinel) and elevenlabs_voices:
         try:
             logger.info("Cast provider=llm characters=%d voices=%d", len(memory.characters), len(elevenlabs_voices))
             cast = llm_cast_from_memory(memory, provider, elevenlabs_voices, existing)
@@ -110,6 +146,80 @@ def build_cast(
 
 class _HeuristicSentinel:
     """Marker — never used directly; keeps the isinstance check readable."""
+
+
+def llm_single_narrator_cast(
+    memory: StoryMemory,
+    provider: LLMProvider,
+    elevenlabs_voices: list[dict],
+    existing: Cast | None = None,
+) -> Cast:
+    valid_voice_ids = {str(v.get("voice_id")) for v in elevenlabs_voices if v.get("voice_id")}
+
+    voices_payload = []
+    for v in elevenlabs_voices:
+        vid = v.get("voice_id")
+        if not vid:
+            continue
+        labels = v.get("labels") if isinstance(v.get("labels"), dict) else {}
+        entry: dict = {"voice_id": str(vid), "name": v.get("name") or ""}
+        for key in ("gender", "age", "accent", "description", "use_case"):
+            val = labels.get(key)
+            if val:
+                entry[key] = str(val)
+        voices_payload.append(entry)
+
+    chars_payload: dict = {
+        "title": memory.title,
+        "characters": [{"name": name, "gender": p.gender, "personality": (p.personality or "")[:200]}
+                       for name, p in memory.characters.items()],
+    }
+
+    user = CAST_SINGLE_NARRATOR_USER_TEMPLATE.format(
+        characters_json=json.dumps(chars_payload, ensure_ascii=False, indent=2),
+        voices_json=json.dumps(voices_payload, ensure_ascii=False, indent=2),
+    )
+
+    result = provider.complete_json(CAST_SINGLE_NARRATOR_SYSTEM_PROMPT, user)
+
+    voice_id = str(result.get("narrator_voice_id") or "").strip()
+    reason = str(result.get("reason") or "").strip()
+
+    if voice_id not in valid_voice_ids:
+        logger.warning("LLM single-narrator returned unknown voice_id=%r, using heuristic", voice_id)
+        return single_narrator_cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+
+    voice_index = {str(v.get("voice_id")): v for v in elevenlabs_voices if v.get("voice_id")}
+    cast = Cast(voices={})
+    _register_voice(cast, voice_id, voice_index, "Narrator")
+
+    all_characters = {"Narrator", "Unknown Speaker", *memory.characters.keys()}
+    for character in sorted(all_characters):
+        cast.assignments[character] = CastAssignment(
+            character=character,
+            voice_id=voice_id,
+            reason=reason if character == "Narrator" else f"Single narrator mode — one voice for all.",
+        )
+    return cast
+
+
+def single_narrator_cast_from_memory(
+    memory: StoryMemory,
+    existing: Cast | None = None,
+    elevenlabs_voices: list[dict] | None = None,
+) -> Cast:
+    voice_id = default_voice_id(elevenlabs_voices) or "narrator_cn_warm"
+    cast = Cast(voices={**DEFAULT_VOICES})
+    voice_index = {str(v.get("voice_id")): v for v in elevenlabs_voices or [] if v.get("voice_id")}
+    _register_voice(cast, voice_id, voice_index, "Narrator")
+    all_characters = {"Narrator", "Unknown Speaker", *memory.characters.keys()}
+    for character in sorted(all_characters):
+        cast.assignments[character] = CastAssignment(
+            character=character,
+            voice_id=voice_id,
+            reason="Single narrator mode — one voice performs all characters.",
+        )
+    return cast
 
 
 def llm_cast_from_memory(

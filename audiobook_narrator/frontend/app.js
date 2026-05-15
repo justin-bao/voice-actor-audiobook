@@ -310,6 +310,7 @@ async function loadProject(projectId, chapterId = null) {
 function renderProject(payload) {
   $("project-meta").textContent = payload.config.title;
   $("project-select").value = payload.config.project_id;
+  $("narration-mode").value = payload.config.narration_mode || "multi_voice";
   state.audioManifest = payload.audio_manifest || null;
   state.audioUrl = payload.audio_url || null;
   renderToc();
@@ -1263,6 +1264,20 @@ function wireEvents() {
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
   $("run-pipeline").addEventListener("click", runAnalyzeAnnotateCast);
+  $("narration-mode").addEventListener("change", async () => {
+    if (!state.project) return;
+    const mode = $("narration-mode").value;
+    try {
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/config`, {
+        method: "POST",
+        body: JSON.stringify({ narration_mode: mode }),
+      });
+      state.project = { ...state.project, narration_mode: mode };
+      setStatus(`Narration mode: ${mode === "single_narrator" ? "Single narrator" : "Multi-voice cast"}`);
+    } catch (err) {
+      setStatus(err.message);
+    }
+  });
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
