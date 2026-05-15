@@ -165,33 +165,44 @@ def try_llm_annotation(
         if narration_mode == "single_narrator"
         else ANNOTATE_SYSTEM_PROMPT
     )
-    payload = provider.complete_json(
-        base_prompt.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
-        ANNOTATE_USER_TEMPLATE.format(
-            memory_json=memory.model_dump_json(exclude_none=True),
-            prev_chapter_memory_json=prev_chapter_memory_json,
-            chapter_memory_json=chapter_memory_json,
-            chunks="\n".join(f"{i}: {chunk}" for i, chunk in enumerate(chunks)),
-        ),
-    )
-    rows = payload.get("passages", [])
-    if not isinstance(rows, list):
-        logger.warning("LLM annotation rejected chapter=%s reason=passages_not_list", chapter_id)
-        return []
     by_index: dict[int, dict] = {}
-    for fallback_index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            continue
-        index = annotation_row_index(row, fallback_index, len(chunks))
-        if index is None:
-            logger.warning(
-                "LLM annotation row rejected chapter=%s reason=bad_index fallback_index=%s keys=%s",
-                chapter_id,
-                fallback_index,
-                sorted(row.keys()),
-            )
-            continue
-        by_index[index] = row
+    missing_indices = list(range(len(chunks)))
+    max_attempts = 4
+    for attempt in range(max_attempts):
+        if not missing_indices:
+            break
+        request_indices = missing_indices
+        payload = provider.complete_json(
+            base_prompt.replace("__ALLOWED_AUDIO_TAGS__", allowed_audio_tags_prompt()),
+            ANNOTATE_USER_TEMPLATE.format(
+                memory_json=memory.model_dump_json(exclude_none=True),
+                prev_chapter_memory_json=prev_chapter_memory_json,
+                chapter_memory_json=chapter_memory_json,
+                chunks="\n".join(f"{i}: {chunks[i]}" for i in request_indices),
+            ),
+        )
+        rows = payload.get("passages", [])
+        if not isinstance(rows, list):
+            logger.warning("LLM annotation rejected chapter=%s reason=passages_not_list", chapter_id)
+            break
+        new_indices = merge_annotation_rows(
+            chapter_id=chapter_id,
+            rows=rows,
+            by_index=by_index,
+            request_indices=request_indices,
+            chunk_count=len(chunks),
+        )
+        missing_indices = [index for index in missing_indices if index not in new_indices]
+        logger.info(
+            "Annotation pass chapter=%s attempt=%s requested=%s returned_new=%s remaining=%s",
+            chapter_id,
+            attempt + 1,
+            len(request_indices),
+            len(new_indices),
+            len(missing_indices),
+        )
+        if not new_indices:
+            break
     passages: list[Passage] = []
     llm_count = 0
     for index, chunk in enumerate(chunks):
@@ -222,6 +233,42 @@ def try_llm_annotation(
         "Annotation source chapter=%s llm_rows=%s chunks=%s", chapter_id, llm_count, len(chunks)
     )
     return passages
+
+
+def merge_annotation_rows(
+    *,
+    chapter_id: str,
+    rows: list,
+    by_index: dict[int, dict],
+    request_indices: list[int],
+    chunk_count: int,
+) -> set[int]:
+    new_indices: set[int] = set()
+    for fallback_position, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        fallback_index = request_indices[fallback_position] if fallback_position < len(request_indices) else None
+        index = annotation_row_index(row, fallback_index, chunk_count)
+        if index is None:
+            logger.warning(
+                "LLM annotation row rejected chapter=%s reason=bad_index fallback_index=%s keys=%s",
+                chapter_id,
+                fallback_index,
+                sorted(row.keys()),
+            )
+            continue
+        if index not in request_indices:
+            logger.warning(
+                "LLM annotation row ignored chapter=%s reason=unexpected_index index=%s requested=%s",
+                chapter_id,
+                index,
+                request_indices,
+            )
+            continue
+        if index not in by_index:
+            new_indices.add(index)
+        by_index[index] = row
+    return new_indices
 
 
 def passage_from_llm_row(
@@ -260,18 +307,18 @@ def passage_from_llm_row(
     )
 
 
-def annotation_row_index(row: dict, fallback_index: int, chunk_count: int) -> int | None:
+def annotation_row_index(row: dict, fallback_index: int | None, chunk_count: int) -> int | None:
     raw_index = first_present(row, "chunk_index", "index", "chunk", "chunk_id", "passage_id", "id")
     if raw_index is None:
-        return fallback_index if fallback_index < chunk_count else None
+        return fallback_index if fallback_index is not None and fallback_index < chunk_count else None
     index = parse_annotation_index(raw_index)
     if index is None:
-        return fallback_index if fallback_index < chunk_count else None
+        return fallback_index if fallback_index is not None and fallback_index < chunk_count else None
     if 0 <= index < chunk_count:
         return index
     if 1 <= index <= chunk_count:
         return index - 1
-    return fallback_index if fallback_index < chunk_count else None
+    return fallback_index if fallback_index is not None and fallback_index < chunk_count else None
 
 
 def parse_annotation_index(value: object) -> int | None:

@@ -628,7 +628,6 @@ function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-v
 
 function renderElevenVoices() {
   $("voice-library").innerHTML = state.elevenVoices
-    .slice(0, 40)
     .map((voice) => {
       const previewBtn = voice.preview_url
         ? `<button class="voice-preview-btn" data-voice-id="${escapeAttr(voice.voice_id)}" title="Preview voice">▶</button>`

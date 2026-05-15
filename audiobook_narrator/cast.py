@@ -277,12 +277,12 @@ def llm_cast_from_memory(
         reason = str(row.get("reason") or "").strip()
         if not character:
             continue
-        # Preserve a manually-set assignment that already has a real provider voice
         if existing and character in existing.assignments:
-            if assignment_has_provider_voice(existing.assignments[character], existing):
-                cast.assignments[character] = existing.assignments[character]
-                _register_voice(cast, existing.assignments[character].voice_id, voice_index, character)
-                used_voice_ids.add(existing.assignments[character].voice_id)
+            existing_assignment = existing.assignments[character]
+            if assignment_has_provider_voice(existing_assignment, existing):
+                cast.assignments[character] = existing_assignment
+                _register_voice(cast, existing_assignment.voice_id, voice_index, character)
+                used_voice_ids.add(existing_assignment.voice_id)
                 assigned.add(character)
                 continue
         if voice_id not in valid_voice_ids:
@@ -317,7 +317,7 @@ def llm_cast_from_memory(
             used_voice_ids.add(voice_id)
         else:
             fallback_id = "narrator_cn_warm" if character == "Narrator" else "neutral_cn_young"
-            cast.voices.update(DEFAULT_VOICES)
+            ensure_voice_exists(cast, fallback_id, elevenlabs_voices)
             cast.assignments[character] = CastAssignment(
                 character=character,
                 voice_id=fallback_id,
@@ -348,7 +348,7 @@ def cast_from_memory(
     existing: Cast | None = None,
     elevenlabs_voices: list[dict] | None = None,
 ) -> Cast:
-    cast = Cast(voices={**DEFAULT_VOICES, **(existing.voices if existing else {})})
+    cast = Cast(voices=dict(existing.voices) if existing else {})
     used_provider_voices = {
         voice.provider_voice for voice in cast.voices.values() if voice.provider_voice
     }
@@ -383,6 +383,7 @@ def cast_from_memory(
             reason_prefix = "Selected from ElevenLabs voices"
         else:
             voice_id = palette[index % len(palette)]
+            ensure_voice_exists(cast, voice_id, elevenlabs_voices)
             reason_prefix = "Assigned from fallback Mandarin voice palette"
         notes = profile.voice_notes or profile.personality
         cast.assignments[character] = CastAssignment(
@@ -424,6 +425,9 @@ def default_voice_id(elevenlabs_voices: list[dict] | None) -> str | None:
 
 def ensure_voice_exists(cast: Cast, voice_id: str, elevenlabs_voices: list[dict] | None) -> None:
     if voice_id in cast.voices:
+        return
+    if voice_id in DEFAULT_VOICES:
+        cast.voices[voice_id] = DEFAULT_VOICES[voice_id]
         return
     for row in elevenlabs_voices or []:
         if row.get("voice_id") == voice_id:

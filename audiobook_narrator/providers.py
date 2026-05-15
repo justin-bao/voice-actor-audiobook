@@ -484,20 +484,41 @@ class ElevenLabsTTSProvider:
             raise RuntimeError(f"ElevenLabs request failed ({exc.code}): {detail}") from exc
 
     def list_voices(self, page_size: int = 100) -> list[dict]:
-        query = urllib.parse.urlencode({"page_size": page_size})
-        url = f"{self.API_BASE.replace('/v1', '/v2')}/voices?{query}"
-        request = urllib.request.Request(
-            url,
-            method="GET",
-            headers={"xi-api-key": self.api_key, "Accept": "application/json"},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"ElevenLabs voice list failed ({exc.code}): {detail}") from exc
-        return payload.get("voices", [])
+        voices: list[dict] = []
+        next_page_token: str | None = None
+        seen_tokens: set[str] = set()
+
+        while True:
+            params = {"page_size": page_size}
+            if next_page_token:
+                params["next_page_token"] = next_page_token
+            query = urllib.parse.urlencode(params)
+            url = f"{self.API_BASE.replace('/v1', '/v2')}/voices?{query}"
+            request = urllib.request.Request(
+                url,
+                method="GET",
+                headers={"xi-api-key": self.api_key, "Accept": "application/json"},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
+                    payload = json.loads(response.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")
+                raise RuntimeError(f"ElevenLabs voice list failed ({exc.code}): {detail}") from exc
+
+            page_voices = payload.get("voices", [])
+            if isinstance(page_voices, list):
+                voices.extend(page_voices)
+
+            if not payload.get("has_more"):
+                return voices
+
+            next_token = str(payload.get("next_page_token") or "").strip()
+            if not next_token or next_token in seen_tokens:
+                logger.warning("ElevenLabs voice pagination stopped due to missing or repeated next_page_token.")
+                return voices
+            seen_tokens.add(next_token)
+            next_page_token = next_token
 
     def _load_env_voice_map(self) -> dict[str, str]:
         raw = os.getenv("ELEVENLABS_VOICE_MAP_JSON", "").strip()

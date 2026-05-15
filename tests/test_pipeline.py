@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from audiobook_narrator.audio_tags import normalize_audio_tags
 from audiobook_narrator.analyze import (
@@ -15,7 +16,7 @@ from audiobook_narrator.analyze import (
 )
 from audiobook_narrator.annotate import annotate_project
 from audiobook_narrator.annotate import try_llm_annotation
-from audiobook_narrator.cast import build_cast, cast_from_memory
+from audiobook_narrator.cast import build_cast, cast_from_memory, llm_cast_from_memory
 from audiobook_narrator.cli import extension_for_backend
 from audiobook_narrator.evals import evaluate_analysis, evaluate_annotations, evaluate_cast
 from audiobook_narrator.models import Cast, CastAssignment, CharacterMemory, Passage, StoryMemory, Voice
@@ -175,6 +176,66 @@ class IdAnnotationProvider:
                 },
             ]
         }
+
+
+class SequentialAnnotationProvider:
+    provider_name = "sequential-annotation"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete_json(self, system: str, user: str) -> dict:
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "passages": [
+                    {
+                        "chunk_index": 0,
+                        "speaker": "Narrator",
+                        "audio_tags": ["[tense]"],
+                        "rationale": "First chunk handled on the first pass.",
+                    }
+                ]
+            }
+        return {
+            "passages": [
+                {
+                    "chunk_index": 1,
+                    "speaker": "汪淼",
+                    "audio_tags": ["[whispers]"],
+                    "rationale": "Missing chunk handled on the retry.",
+                }
+            ]
+        }
+
+
+class StaticCastProvider:
+    provider_name = "static-cast"
+
+    def complete_json(self, system: str, user: str) -> dict:
+        return {
+            "assignments": [
+                {"character": "Narrator", "voice_id": "voice-narrator", "reason": "Neutral narration."},
+                {"character": "汪淼", "voice_id": "voice-new", "reason": "LLM-selected fresh fit."},
+                {"character": "Unknown Speaker", "voice_id": "voice-neutral", "reason": "Fallback."},
+            ]
+        }
+
+
+class FakeHTTPResponse:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "FakeHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def read(self) -> bytes:
+        import json
+
+        return json.dumps(self.payload).encode("utf-8")
 
 
 class PipelineTest(unittest.TestCase):
@@ -381,6 +442,49 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(cast.voices["saved_wang"].provider_voice, "voice-existing")
         self.assertEqual(cast.voices[cast.assignments["叶文洁"].voice_id].provider_voice, "voice-female")
 
+    def test_llm_cast_preserves_existing_real_assignment_for_consistency(self) -> None:
+        memory = StoryMemory(title="测试书")
+        memory.characters["汪淼"] = CharacterMemory(name="汪淼", age="adult", gender="male")
+        existing = Cast(
+            assignments={
+                "汪淼": CastAssignment(character="汪淼", voice_id="voice-old", reason="Earlier cast"),
+            },
+            voices={"voice-old": Voice(voice_id="voice-old", provider_voice="voice-old", language="zh")},
+        )
+        voices = [
+            {"voice_id": "voice-narrator", "name": "Narrator"},
+            {"voice_id": "voice-new", "name": "New"},
+            {"voice_id": "voice-neutral", "name": "Neutral"},
+        ]
+
+        cast = llm_cast_from_memory(memory, StaticCastProvider(), voices, existing=existing)
+
+        self.assertEqual(cast.assignments["汪淼"].voice_id, "voice-old")
+        self.assertEqual(cast.assignments["汪淼"].reason, "Earlier cast")
+
+    def test_cast_starts_without_unused_default_voice_palette(self) -> None:
+        memory = StoryMemory(title="测试书")
+        voices = [{"voice_id": "voice-narrator", "name": "Narrator"}]
+
+        with patch.dict("os.environ", {"ELEVENLABS_DEFAULT_VOICE_ID": ""}, clear=False):
+            cast = cast_from_memory(memory, elevenlabs_voices=voices)
+
+        self.assertEqual(set(cast.voices), {"voice-narrator", "neutral_cn_young"})
+
+    def test_new_project_memory_starts_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ProjectStore(Path(tmp) / "projects")
+            store.create_project("book", "测试书")
+
+            memory = store.load_memory("book")
+
+            self.assertEqual(memory.plot_summary, "")
+            self.assertEqual(memory.current_state, "")
+            self.assertEqual(memory.themes, [])
+            self.assertEqual(memory.pronunciation_notes, {})
+            self.assertEqual(memory.characters, {})
+            self.assertEqual(memory.chapter_summaries, {})
+
     def test_annotation_uses_partial_llm_rows_without_total_fallback(self) -> None:
         story_memory = StoryMemory(title="测试书")
         chunks = ["旁白很紧张。", "“真的吗？”汪淼问。"]
@@ -408,10 +512,56 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(passages[1].speaker, "汪淼")
         self.assertNotIn("Heuristic annotation", passages[1].rationale)
 
+    def test_annotation_retries_missing_chunks_until_covered(self) -> None:
+        story_memory = StoryMemory(title="测试书")
+        chunks = ["旁白很紧张。", "“真的吗？”汪淼问。"]
+        provider = SequentialAnnotationProvider()
+
+        passages = try_llm_annotation("ch01", chunks, story_memory, provider)
+
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(passages[0].rationale, "First chunk handled on the first pass.")
+        self.assertEqual(passages[1].rationale, "Missing chunk handled on the retry.")
+        self.assertNotIn("Heuristic annotation", passages[1].rationale)
+
     def test_elevenlabs_audio_tags_are_normalized_to_allowlist(self) -> None:
         self.assertEqual(
             normalize_audio_tags(["[suspense]", "[not a tag]", "whispering", "urgent"]),
             ["[tense]", "[whispers]", "[shouts]"],
+        )
+
+    def test_elevenlabs_voice_listing_follows_pagination(self) -> None:
+        requests = []
+        responses = [
+            FakeHTTPResponse(
+                {
+                    "voices": [{"voice_id": "voice-1"}],
+                    "has_more": True,
+                    "next_page_token": "page-2",
+                }
+            ),
+            FakeHTTPResponse(
+                {
+                    "voices": [{"voice_id": "voice-2"}],
+                    "has_more": False,
+                    "next_page_token": None,
+                }
+            ),
+        ]
+
+        def fake_urlopen(request, **kwargs):
+            requests.append(request.full_url)
+            return responses.pop(0)
+
+        with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}, clear=False):
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                voices = ElevenLabsTTSProvider().list_voices(page_size=50)
+
+        self.assertEqual([voice["voice_id"] for voice in voices], ["voice-1", "voice-2"])
+        self.assertEqual(parse_qs(urlparse(requests[0]).query), {"page_size": ["50"]})
+        self.assertEqual(
+            parse_qs(urlparse(requests[1]).query),
+            {"page_size": ["50"], "next_page_token": ["page-2"]},
         )
 
     def test_elevenlabs_backend_chunks_dialogue_inputs(self) -> None:
