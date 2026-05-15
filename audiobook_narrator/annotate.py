@@ -28,7 +28,7 @@ Embed audio tags INLINE in the text at the exact position where the performance 
   "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
   "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
 
-PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the pinyin guide in parentheses at its FIRST occurrence in each passage. This gives the TTS engine a phonetic anchor at the exact position. Format: 汪淼(Wāng Miǎo). Do not add pinyin for common everyday words; only for terms explicitly listed in pronunciation_notes.
+PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the stored Hanyu Pinyin guide in parentheses at its FIRST occurrence in each passage. This gives the TTS engine a Mandarin-native phonetic anchor at the exact position. Format: 汪淼(Wāng Miǎo). Do not invent English respellings, and do not add pinyin for common everyday words; only use terms explicitly listed in pronunciation_notes.
 
 Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index and contain:
 {

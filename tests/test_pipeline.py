@@ -48,7 +48,7 @@ class StaticLLMProvider:
             "summary": "叶文洁和汪淼在压抑的谈话中面对无法轻易停止的危机。",
             "current_state": "叶文洁暗示事件已经越过可控边界，汪淼仍在追问真相。",
             "themes": ["失控的开端", "秘密与追问"],
-            "pronunciation_notes": {"汪淼": "Wang Miao"},
+            "pronunciation_notes": {"汪淼": "Wāng Miǎo (wāng1 miǎo3)"},
             "characters": [
                 {
                     "name": "叶文洁",
@@ -87,6 +87,44 @@ class RecordingLLMProvider:
                     "role_in_plot": f"{chapter_id} role",
                     "voice_notes": f"{chapter_id} voice",
                 }
+            ],
+        }
+
+
+class CollectiveCharacterProvider:
+    provider_name = "collective-character"
+
+    def complete_json(self, system: str, user: str) -> dict:
+        return {
+            "summary": "队伍在压力中继续前进。",
+            "current_state": "杭一继续带领队伍。",
+            "character_updates": [
+                {
+                    "name": "杭一",
+                    "personality_baseline": "冷静、负责。",
+                    "role_in_plot": "带领队伍前进。",
+                    "voice_notes": "年轻、克制。",
+                },
+                {
+                    "name": "组员集体",
+                    "personality_baseline": "紧张。",
+                    "role_in_plot": "队伍整体。",
+                    "voice_notes": "不应存在。",
+                },
+            ],
+            "character_states": [
+                {
+                    "name": "杭一",
+                    "emotional_state": "压住焦虑继续指挥。",
+                    "vocal_quality": "沉稳。",
+                    "arc_this_chapter": "继续承担领导责任。",
+                },
+                {
+                    "name": "组员集体",
+                    "emotional_state": "焦虑。",
+                    "vocal_quality": "不应存在。",
+                    "arc_this_chapter": "不应存在。",
+                },
             ],
         }
 
@@ -183,7 +221,7 @@ class PipelineTest(unittest.TestCase):
                 "叶文洁暗示事件已经越过可控边界，汪淼仍在追问真相。",
             )
             self.assertIn("秘密与追问", memory.themes)
-            self.assertEqual(memory.pronunciation_notes["汪淼"], "Wang Miao")
+            self.assertEqual(memory.pronunciation_notes["汪淼"], "Wāng Miǎo (wāng1 miǎo3)")
             self.assertNotEqual(memory.characters["叶文洁"].personality, UNKNOWN_PERSONALITY)
             self.assertEqual(set(memory.characters), {"叶文洁", "汪淼"})
             self.assertIn("汪淼", memory.characters)
@@ -248,6 +286,21 @@ class PipelineTest(unittest.TestCase):
             chapter_memory.character_changes["汪淼"].changes,
             "从试探转为确信存在隐情。",
         )
+
+    def test_analyze_rejects_collective_pseudo_characters(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / "chapter.txt"
+            source.write_text("杭一说。大家沉默。", encoding="utf-8")
+            store = ProjectStore(base / "projects")
+            store.create_project("book", "测试书")
+            ingest_chapter(store, "book", source, "第一章", "ch01")
+
+            memory = update_story_memory(store, "book", CollectiveCharacterProvider())
+            chapter_memory = store.load_chapter_memory("book", "ch01")
+
+            self.assertEqual(set(memory.characters), {"杭一"})
+            self.assertEqual(set(chapter_memory.character_changes), {"杭一"})
 
     def test_analyze_ignores_embedded_annotation_text_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

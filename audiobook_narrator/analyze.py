@@ -27,7 +27,12 @@ Analyze the chapter and return strict JSON with two clearly separated sections.
 
 SEMANTIC — stable facts to merge into running character biographies and world knowledge:
   character_updates: stable attributes for voice casting and story continuity
-  pronunciation_notes: how to read specific terms
+    - Only include named INDIVIDUAL characters who could plausibly have their own distinct speaking voice.
+    - Exclude collectives, crowds, factions, organizations, relationship buckets, and unnamed groups such as "组员集体", "众人", "大家", or "队员们".
+    - If the text describes a group's shared mood, put that in chapter_atmosphere or narrative_arc instead of creating a character row.
+  pronunciation_notes: Mandarin-native reading notes for specific terms
+    - Use Hanyu Pinyin with tone marks and, when useful, tone numbers or a short Mandarin-specific disambiguation.
+    - Do NOT use English sound-alikes such as "mee", "scene", or "lay".
   themes: short thematic labels for the overall book
 
 EPISODIC — transient state for THIS chapter only, used directly by the audiobook director:
@@ -44,7 +49,7 @@ Return strict JSON:
   "narrative_arc": "how the chapter flows: opening, turning points, close",
   "current_state": "where the story stands at chapter end",
   "themes": ["short theme labels"],
-  "pronunciation_notes": {"term": "how to read it"},
+  "pronunciation_notes": {"term": "pinyin with tone marks, optionally plus tone numbers or brief Mandarin-specific note"},
   "character_updates": [
     {
       "name": "canonical display name",
@@ -226,7 +231,7 @@ def valid_character_rows(rows: object) -> list[dict]:
         if not isinstance(row, dict):
             continue
         name = clean_name(str(row.get("name", "")).strip())
-        if name and not _looks_like_common_phrase(name):
+        if is_individual_character_name(name):
             valid.append(row)
     return valid
 
@@ -252,7 +257,7 @@ def merge_chapter_character_changes(chapter_memory: ChapterMemory, rows: object)
         if not isinstance(row, dict):
             continue
         name = clean_name(str(row.get("name", "")).strip())
-        if not name or _looks_like_common_phrase(name):
+        if not is_individual_character_name(name):
             continue
         chapter_memory.character_changes[name] = ChapterCharacterMemory(
             name=name,
@@ -274,7 +279,7 @@ def merge_chapter_character_states(chapter_memory: ChapterMemory, rows: object) 
         if not isinstance(row, dict):
             continue
         name = clean_name(str(row.get("name", "")).strip())
-        if not name or _looks_like_common_phrase(name):
+        if not is_individual_character_name(name):
             continue
         emotional_state = str(row.get("emotional_state", "")).strip()
         vocal_quality = str(row.get("vocal_quality", "")).strip()
@@ -353,7 +358,7 @@ def merge_characters(memory: StoryMemory, chapter_id: str, characters: object) -
 
 def merge_character(memory: StoryMemory, chapter_id: str, row: dict) -> None:
     name = clean_name(str(row.get("name", "")).strip())
-    if not name or _looks_like_common_phrase(name):
+    if not is_individual_character_name(name):
         return
     existing = memory.characters.get(name)
     if existing is None:
@@ -408,11 +413,11 @@ def discover_character_names(text: str) -> list[str]:
         rf"({CHINESE_NAME.pattern})(?:轻声|低声|大声|冷冷|忽然)?(?:说|问|道|回答)", text
     ):
         name = clean_name(match.group(1))
-        if not _looks_like_common_phrase(name):
+        if is_individual_character_name(name):
             candidates[name] = candidates.get(name, 0) + 1
     for match in re.finditer(rf"[”」』]({CHINESE_NAME.pattern})(?:说|问|道|回答)", text):
         name = clean_name(match.group(1))
-        if not _looks_like_common_phrase(name):
+        if is_individual_character_name(name):
             candidates[name] = candidates.get(name, 0) + 1
     return [name for name, _ in sorted(candidates.items(), key=lambda item: (-item[1], item[0]))[:24]]
 
@@ -444,3 +449,29 @@ def _looks_like_common_phrase(value: str) -> bool:
         "人在",
     }
     return value in blocked or len(value) < 2
+
+
+def _looks_like_collective_label(value: str) -> bool:
+    blocked = {
+        "组员集体",
+        "众人",
+        "大家",
+        "所有人",
+        "全体成员",
+        "一行人",
+        "队员们",
+        "同学们",
+        "学生们",
+        "老师们",
+        "士兵们",
+        "人群",
+        "群众",
+        "全组",
+        "全队",
+        "其他人",
+    }
+    return value in blocked or value.endswith(("集体", "们"))
+
+
+def is_individual_character_name(value: str) -> bool:
+    return bool(value) and not _looks_like_common_phrase(value) and not _looks_like_collective_label(value)

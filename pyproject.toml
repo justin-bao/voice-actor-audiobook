@@ -19,5 +19,9 @@ langfuse = ["langfuse>=3.0"]
 audiobook-narrator = "audiobook_narrator.cli:main"
 audiobook-narrator-web = "audiobook_narrator.web:main"
 
+[tool.setuptools.packages.find]
+include = ["audiobook_narrator*"]
+exclude = ["projects*", "chaojinjiyouxi4*", "tests*", "examples*"]
+
 [tool.ruff]
 line-length = 100

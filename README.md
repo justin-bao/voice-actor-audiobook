@@ -41,6 +41,18 @@ Or run the local studio UI:
 audiobook-narrator-web --host 127.0.0.1 --port 8765
 ```
 
+If that command is not installed in your current shell yet, use the module form directly:
+
+```bash
+python3 -m audiobook_narrator.web --host 127.0.0.1 --port 8765
+```
+
+The `audiobook-narrator-web` command is created by the editable install step above. If you see `command not found`, rerun the install from the repo root:
+
+```bash
+python3 -m pip install -e ".[openai,epub]"
+```
+
 Open `http://127.0.0.1:8765` to paste/edit chapter text, import `.txt`, `.md`, `.docx`, `.pdf`, or `.epub`, review annotations, edit character memory, assign voices, and generate output.
 
 ## Memory Model
