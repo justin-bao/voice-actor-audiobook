@@ -1011,12 +1011,35 @@ async function saveCharacterVoiceAssignments() {
   });
 }
 
+async function runAnalyzeAnnotateCast() {
+  if (!state.project) return;
+  setBusy(true, "Analyzing", "Updating plot, character memory, and story understanding...");
+  setStatus("Analyze + Annotate + Cast started");
+  try {
+    const analyzePayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ step: "analyze", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
+    });
+    setBusy(true, "Casting Voices", "Assigning voices to characters and speakers...");
+    const castPayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ step: "cast", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
+    });
+    await loadProject(state.project.project_id, state.selectedChapterId);
+    const llm = analyzePayload.llm
+      ? ` with ${analyzePayload.llm.provider}${analyzePayload.llm.model ? ` (${analyzePayload.llm.model})` : ""}`
+      : "";
+    setStatus(`Analyze + Annotate + Cast complete${llm}`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function runStep(step) {
   if (!state.project) return;
   const busyCopy = {
-    analyze: ["Analyzing", "Updating plot, character memory, and story understanding..."],
-    annotate: ["Annotating", "Waiting on narration annotations, speaker labels, and emotion tags..."],
-    cast: ["Casting Voices", "Assigning voices to characters and speakers..."],
     synthesize: ["Generating", "Creating narration output..."],
   }[step] || ["Working", "Processing..."];
   setBusy(true, busyCopy[0], busyCopy[1]);
@@ -1239,9 +1262,7 @@ function wireEvents() {
   $("save-characters").addEventListener("click", saveCharacterProfiles);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
-  $("run-analyze").addEventListener("click", () => runStep("analyze"));
-  $("run-annotate").addEventListener("click", () => runStep("annotate"));
-  $("run-cast").addEventListener("click", () => runStep("cast"));
+  $("run-pipeline").addEventListener("click", runAnalyzeAnnotateCast);
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));

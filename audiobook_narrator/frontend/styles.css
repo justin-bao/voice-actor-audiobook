@@ -158,6 +158,10 @@ textarea:focus-visible {
   gap: 8px;
 }
 
+#run-pipeline {
+  grid-column: 1 / -1;
+}
+
 .side-actions button,
 .book-controls button {
   border-color: #3c594f;
