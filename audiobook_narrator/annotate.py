@@ -28,17 +28,19 @@ Embed audio tags INLINE in the text at the exact position where the performance 
   "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
   "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
 
+PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the pinyin guide in parentheses at its FIRST occurrence in each passage. This gives the TTS engine a phonetic anchor at the exact position. Format: 汪淼(Wāng Miǎo). Do not add pinyin for common everyday words; only for terms explicitly listed in pronunciation_notes.
+
 Return strict JSON with a "passages" array. Each passage must preserve the numbered chunk index and contain:
 {
   "chunk_index": 0,
   "speaker": "Narrator or character name",
-  "text": "original text with [tag] markers embedded at the positions where they apply",
+  "text": "original text with [tag] markers and pronunciation guides embedded",
   "pace": "slow|medium|quick",
   "intensity": 1-5,
   "pause_after_ms": integer,
   "rationale": "specific performance note tied to this passage"
 }
-Only insert tags from the allowlist. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
+Only insert tags from the allowlist and pinyin guides. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
 
 ANNOTATE_USER_TEMPLATE = """Book memory (cumulative facts, character bios, story context):
 {memory_json}

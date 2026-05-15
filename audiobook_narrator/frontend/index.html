@@ -36,9 +36,7 @@
 
         <div class="side-actions">
           <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
-          <button id="run-analyze" title="Analyze story memory">Analyze</button>
-          <button id="run-annotate" title="Annotate passages">Annotate</button>
-          <button id="run-cast" title="Assign voices to characters and speakers">Cast Voices</button>
+          <button id="run-pipeline" title="Analyze story memory, annotate passages, and assign voices">Analyze + Annotate + Cast</button>
         </div>
 
         <div class="toc-section">
@@ -78,6 +76,7 @@
               <button id="toggle-inspector" class="toolbar-details" title="Open memory, character, and voice drawer">☰ Details</button>
             </div>
           </div>
+          <div id="audio-player-section" class="audio-player-section" hidden></div>
           <div id="transcript-wrap" class="editor-view active">
             <textarea id="book-editor" spellcheck="false"></textarea>
             <div id="inline-annotations" class="inline-annotations" hidden></div>

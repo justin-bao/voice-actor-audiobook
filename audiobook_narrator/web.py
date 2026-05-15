@@ -110,6 +110,8 @@ class NarratorWebApp:
         annotations = []
         annotated_text = ""
         chapter_memory = None
+        audio_manifest = None
+        audio_url = None
         if selected:
             source_path = paths.source / f"{selected}.txt"
             if source_path.exists():
@@ -121,6 +123,12 @@ class NarratorWebApp:
             loaded_chapter_memory = self.store.load_chapter_memory(project_id, selected)
             if loaded_chapter_memory:
                 chapter_memory = loaded_chapter_memory.model_dump(mode="json")
+            manifest_path = paths.audio / f"{selected}.parts.json"
+            audio_path = paths.audio / f"{selected}.mp3"
+            if manifest_path.exists() and audio_path.exists():
+                audio_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mtime = int(audio_path.stat().st_mtime)
+                audio_url = f"/api/projects/{project_id}/audio/{selected}?v={mtime}"
         memory_path = paths.memory / "story.json"
         cast_path = paths.casts / "voices.json"
         return {
@@ -133,6 +141,8 @@ class NarratorWebApp:
             "annotations": annotations,
             "annotated_text": annotated_text,
             "cast": json.loads(cast_path.read_text(encoding="utf-8")) if cast_path.exists() else None,
+            "audio_manifest": audio_manifest,
+            "audio_url": audio_url,
         }
 
     def save_chapter(self, project_id: str, body: dict) -> dict:
@@ -391,6 +401,35 @@ class NarratorWebApp:
             return {"ok": True, "ssml": ssml, "output": audio}
         raise ValueError(f"Unknown step: {step}")
 
+    def regenerate_chunk(self, project_id: str, chapter_id: str, chunk_index: int, backend: str) -> dict:
+        if backend != "elevenlabs":
+            raise ValueError("Block regeneration requires the elevenlabs backend.")
+        paths = self.store.paths(project_id)
+        manifest_path = paths.audio / f"{chapter_id}.parts.json"
+        if not manifest_path.exists():
+            raise ValueError(f"No audio manifest for chapter {chapter_id}. Run full synthesis first.")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if chunk_index < 0 or chunk_index >= len(manifest):
+            raise ValueError(f"Chunk {chunk_index} is out of range (0–{len(manifest) - 1}).")
+        chunk = manifest[chunk_index]
+        passage_indices = [p["index"] for p in chunk.get("passages", [])]
+        all_annotations = self.store.read_jsonl(paths.annotations / f"{chapter_id}.jsonl")
+        passages = [
+            Passage.model_validate(all_annotations[i])
+            for i in passage_indices
+            if i < len(all_annotations)
+        ]
+        cast = self.store.read_json(paths.casts / "voices.json", Cast)
+        provider = ElevenLabsTTSProvider()
+        provider.regenerate_chunk_audio(passages, speaker_voice_map(cast), Path(chunk["path"]))
+        combined_path = paths.audio / f"{chapter_id}.mp3"
+        with open(combined_path, "wb") as combined:
+            for c in manifest:
+                chunk_path = Path(c["path"])
+                if chunk_path.exists():
+                    combined.write(chunk_path.read_bytes())
+        return {"ok": True, "chunk_index": chunk_index}
+
     def elevenlabs_voices(self) -> dict:
         voices = ElevenLabsTTSProvider().list_voices()
         return {"voices": voices}
@@ -460,6 +499,9 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                 if parsed.path == "/api/projects":
                     return self.send_json(app.list_projects())
                 if parsed.path.startswith("/api/projects/"):
+                    parts = decoded_path_parts(parsed.path)
+                    if len(parts) == 5 and parts[3] == "audio":
+                        return self.serve_audio_file(parts[2], parts[4])
                     project_id = unquote(parsed.path.split("/")[3])
                     chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
                     return self.send_json(app.project_payload(project_id, chapter_id))
@@ -505,6 +547,12 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                         return self.send_json(app.save_cast(project_id, body))
                     if len(parts) == 4 and parts[3] == "run":
                         return self.send_json(app.run_step(project_id, body["step"], body.get("chapter_id"), body))
+                    if len(parts) == 6 and parts[3] == "audio" and parts[5] == "regenerate-chunk":
+                        return self.send_json(app.regenerate_chunk(
+                            project_id, parts[4],
+                            int(body.get("chunk_index", 0)),
+                            body.get("backend", "elevenlabs"),
+                        ))
                 raise ValueError("Unknown API route.")
             except Exception as exc:
                 return self.send_error_json(exc)
@@ -540,6 +588,41 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+
+        def serve_audio_file(self, project_id: str, chapter_id: str) -> None:
+            project_id = app.safe_project_id(project_id)
+            chapter_id = app.safe_chapter_id(chapter_id)
+            audio_path = app.store.paths(project_id).audio / f"{chapter_id}.mp3"
+            if not audio_path.exists():
+                self.send_response(404)
+                self.end_headers()
+                return
+            file_size = audio_path.stat().st_size
+            range_header = self.headers.get("Range", "")
+            range_match = re.match(r"bytes=(\d*)-(\d*)", range_header) if range_header else None
+            if range_match:
+                start = int(range_match.group(1)) if range_match.group(1) else 0
+                end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+                end = min(end, file_size - 1)
+                length = end - start + 1
+                self.send_response(206)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(length))
+                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with open(audio_path, "rb") as f:
+                    f.seek(start)
+                    self.wfile.write(f.read(length))
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(file_size))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(audio_path.read_bytes())
 
         def log_message(self, format: str, *args: object) -> None:
             return

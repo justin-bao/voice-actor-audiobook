@@ -101,6 +101,7 @@ class Passage(BaseModel):
     chapter_id: str
     index: int
     text: str
+    tts_text: str = ""
     speaker: str = "Narrator"
     addressee: str | None = None
     emotion: Emotion = Emotion.neutral

@@ -368,9 +368,11 @@ class ElevenLabsTTSProvider:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         chunks = self._dialogue_chunks(passages, voice_by_speaker)
         manifest = []
+        chunk_paths: list[Path] = []
         for chunk_index, chunk in enumerate(chunks):
             part_path = output_path.parent / f"{output_path.stem}_{chunk_index:03d}.mp3"
             self._stream_dialogue(chunk["inputs"], part_path)
+            chunk_paths.append(part_path)
             manifest.append(
                 {
                     "chunk_index": chunk_index,
@@ -381,9 +383,32 @@ class ElevenLabsTTSProvider:
                     "passages": chunk["manifest"],
                 }
             )
+        # Concatenate all chunks into a single playable file
+        with open(output_path, "wb") as combined:
+            for part_path in chunk_paths:
+                combined.write(part_path.read_bytes())
         manifest_path = output_path.with_suffix(".parts.json")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        return manifest_path
+        return output_path
+
+    def _passage_input(
+        self, passage: Passage, voice_by_speaker: dict[str, str]
+    ) -> tuple[dict, str, list[str]]:
+        """Return (dialogue_input_dict, display_text, audio_tags) for one passage.
+
+        If passage.tts_text is set it is sent to the TTS API; the original passage.text
+        is preserved as the display text used for timing and manifest metadata.
+        """
+        voice_id = self.voice_id_for(passage.speaker, voice_by_speaker)
+        display_text = passage.text.strip()
+        tts_base = (passage.tts_text or "").strip() or display_text
+        if extract_inline_tags(tts_base):
+            tagged_text = tts_base
+            audio_tags = extract_inline_tags(tts_base)
+        else:
+            audio_tags = audio_tags_for_passage(passage)
+            tagged_text = " ".join(audio_tags + [tts_base]).strip()
+        return {"text": tagged_text, "voice_id": voice_id}, display_text, audio_tags
 
     def _dialogue_chunks(
         self, passages: list[Passage], voice_by_speaker: dict[str, str]
@@ -394,16 +419,9 @@ class ElevenLabsTTSProvider:
         char_count = 0
         voices: set[str] = set()
         for passage in passages:
-            voice_id = self.voice_id_for(passage.speaker, voice_by_speaker)
-            text = passage.text.strip()
-            if extract_inline_tags(text):
-                # Tags already embedded at specific positions by the annotation step
-                tagged_text = text
-                audio_tags = extract_inline_tags(text)
-            else:
-                # Heuristic/legacy path: prepend passage-level tags to the front
-                audio_tags = audio_tags_for_passage(passage)
-                tagged_text = " ".join(audio_tags + [text]).strip()
+            input_item, display_text, audio_tags = self._passage_input(passage, voice_by_speaker)
+            tagged_text = input_item["text"]
+            voice_id = input_item["voice_id"]
             would_exceed_chars = char_count + len(tagged_text) > self.MAX_DIALOGUE_CHARS
             would_exceed_voices = voice_id not in voices and len(voices) >= self.MAX_UNIQUE_VOICES
             if inputs and (would_exceed_chars or would_exceed_voices):
@@ -412,16 +430,23 @@ class ElevenLabsTTSProvider:
                 manifest = []
                 char_count = 0
                 voices = set()
-            inputs.append({"text": tagged_text, "voice_id": voice_id})
+            inputs.append(input_item)
             manifest.append(
                 part_manifest_row(passage, voice_id, Path(""))
-                | {"audio_tags": audio_tags, "text_chars": len(text), "input_chars": len(tagged_text)}
+                | {"audio_tags": audio_tags, "text_chars": len(display_text), "input_chars": len(tagged_text)}
             )
             char_count += len(tagged_text)
             voices.add(voice_id)
         if inputs:
             chunks.append({"inputs": inputs, "manifest": manifest})
         return chunks
+
+    def regenerate_chunk_audio(
+        self, passages: list[Passage], voice_by_speaker: dict[str, str], output_path: Path
+    ) -> None:
+        """Re-synthesize a single chunk from its passage list and overwrite output_path."""
+        inputs = [self._passage_input(p, voice_by_speaker)[0] for p in passages]
+        self._stream_dialogue(inputs, output_path)
 
     def voice_id_for(self, speaker: str, voice_by_speaker: dict[str, str]) -> str:
         voice_id = self.env_voice_map.get(speaker) or voice_by_speaker.get(speaker)

@@ -9,6 +9,8 @@ const state = {
   annotatedText: "",
   cast: null,
   elevenVoices: [],
+  audioManifest: null,
+  audioUrl: null,
   pendingDeleteChapterId: null,
   pendingDeleteBookId: null,
   pendingClearAnnotationsId: null,
@@ -16,6 +18,218 @@ const state = {
   autoSaveTimer: null,
   autoSaving: false,
 };
+
+let previewAudio = null;
+let previewingVoiceId = null;
+
+let chapterAudio = null;
+let audioTimings = [];
+let activePassageIndex = -1;
+let userIsSeeking = false;
+let passageChunkMap = {};
+
+function playVoicePreview(voiceId) {
+  const voice = state.elevenVoices.find((v) => v.voice_id === voiceId);
+  if (!voice?.preview_url) return;
+  if (previewingVoiceId === voiceId && previewAudio && !previewAudio.paused) {
+    previewAudio.pause();
+    previewAudio.currentTime = 0;
+    previewingVoiceId = null;
+    updatePreviewButtons();
+    return;
+  }
+  if (previewAudio) {
+    previewAudio.pause();
+    previewAudio.currentTime = 0;
+  }
+  previewAudio = new Audio(voice.preview_url);
+  previewingVoiceId = voiceId;
+  previewAudio.addEventListener("ended", () => {
+    previewingVoiceId = null;
+    updatePreviewButtons();
+  });
+  previewAudio.play();
+  updatePreviewButtons();
+}
+
+function updatePreviewButtons() {
+  document.querySelectorAll(".voice-preview-btn").forEach((btn) => {
+    const voiceId = btn.dataset.voiceId
+      || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
+    const isPlaying = !!voiceId && voiceId === previewingVoiceId;
+    btn.textContent = isPlaying ? "⏸" : "▶";
+    btn.classList.toggle("playing", isPlaying);
+  });
+}
+
+function formatTime(seconds) {
+  const s = Math.floor(seconds % 60);
+  const m = Math.floor((seconds || 0) / 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function buildAudioTimings(totalDuration) {
+  const passages = (state.audioManifest || []).flatMap((chunk) => chunk.passages || []);
+  const totalChars = passages.reduce((sum, p) => sum + (p.text_chars || 1), 0);
+  let cumulative = 0;
+  audioTimings = passages.map((p) => {
+    const chars = p.text_chars || 1;
+    const start = (cumulative / totalChars) * totalDuration;
+    cumulative += chars;
+    const end = (cumulative / totalChars) * totalDuration;
+    return { start, end };
+  });
+}
+
+function updateAudioSeek() {
+  const audio = chapterAudio;
+  if (!audio) return;
+  const duration = audio.duration || 0;
+  const current = audio.currentTime || 0;
+  if (!userIsSeeking) {
+    const seekEl = $("audio-seek");
+    if (seekEl) seekEl.value = duration ? Math.round((current / duration) * 10000) : 0;
+  }
+  const timeEl = $("audio-time");
+  if (timeEl) timeEl.textContent = `${formatTime(current)} / ${formatTime(duration)}`;
+}
+
+function clearPassageHighlight() {
+  activePassageIndex = -1;
+  document.querySelectorAll(".inline-annotation-item.audio-active").forEach((el) => {
+    el.classList.remove("audio-active");
+  });
+}
+
+function updateActivePassage(currentTime) {
+  const index = audioTimings.findIndex((t) => currentTime >= t.start && currentTime < t.end);
+  if (index === activePassageIndex) return;
+  activePassageIndex = index;
+  document.querySelectorAll(".inline-annotation-item").forEach((el, i) => {
+    el.classList.toggle("audio-active", i === index);
+  });
+  if (index >= 0) {
+    document.querySelector(`.inline-annotation-item[data-index="${index}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+function toggleAudioPlay() {
+  if (!chapterAudio) return;
+  const btn = $("audio-play-btn");
+  if (chapterAudio.paused) {
+    chapterAudio.play();
+    if (btn) btn.textContent = "⏸";
+  } else {
+    chapterAudio.pause();
+    if (btn) btn.textContent = "▶";
+  }
+}
+
+function initAudioPlayer() {
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  audioTimings = [];
+  activePassageIndex = -1;
+  userIsSeeking = false;
+
+  chapterAudio = new Audio(state.audioUrl);
+  chapterAudio.preload = "metadata";
+
+  chapterAudio.addEventListener("loadedmetadata", () => {
+    buildAudioTimings(chapterAudio.duration);
+    updateAudioSeek();
+  });
+  chapterAudio.addEventListener("timeupdate", () => {
+    updateAudioSeek();
+    updateActivePassage(chapterAudio.currentTime);
+  });
+  chapterAudio.addEventListener("ended", () => {
+    const btn = $("audio-play-btn");
+    if (btn) btn.textContent = "▶";
+    clearPassageHighlight();
+  });
+
+  const playBtn = $("audio-play-btn");
+  if (playBtn) playBtn.addEventListener("click", toggleAudioPlay);
+
+  const regenBtn = $("audio-regen-btn");
+  if (regenBtn) regenBtn.addEventListener("click", () => runStep("synthesize"));
+
+  const seekEl = $("audio-seek");
+  if (seekEl) {
+    seekEl.addEventListener("mousedown", () => { userIsSeeking = true; });
+    seekEl.addEventListener("touchstart", () => { userIsSeeking = true; });
+    seekEl.addEventListener("mouseup", () => { userIsSeeking = false; });
+    seekEl.addEventListener("touchend", () => { userIsSeeking = false; });
+    seekEl.addEventListener("input", (e) => {
+      const duration = chapterAudio?.duration || 0;
+      if (chapterAudio) chapterAudio.currentTime = (Number(e.target.value) / 10000) * duration;
+    });
+  }
+}
+
+function buildPassageChunkMap() {
+  passageChunkMap = {};
+  (state.audioManifest || []).forEach((chunk) => {
+    (chunk.passages || []).forEach((p) => {
+      passageChunkMap[p.index] = chunk.chunk_index;
+    });
+  });
+}
+
+async function regenerateChunk(chunkIndex) {
+  if (!state.project || !state.selectedChapterId) return;
+  setBusy(true, "Regenerating", `Re-synthesizing chunk ${chunkIndex}…`);
+  setStatus(`Regenerating chunk ${chunkIndex}…`);
+  try {
+    await api(
+      `/api/projects/${encodeURIComponent(state.project.project_id)}/audio/${encodeURIComponent(state.selectedChapterId)}/regenerate-chunk`,
+      { method: "POST", body: JSON.stringify({ chunk_index: chunkIndex, backend: "elevenlabs" }) }
+    );
+    await loadProject(state.project.project_id, state.selectedChapterId);
+    setStatus(`Chunk ${chunkIndex} regenerated`);
+  } catch (error) {
+    setStatus(`Regen failed: ${error.message}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function renderAudioPlayer() {
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  clearPassageHighlight();
+  const section = $("audio-player-section");
+  if (!section) return;
+  if (!state.audioManifest || !state.audioUrl) {
+    section.hidden = true;
+    section.innerHTML = "";
+    return;
+  }
+  buildPassageChunkMap();
+  const totalPassages = (state.audioManifest || []).reduce((n, c) => n + (c.passages?.length || 0), 0);
+  const chunkCount = state.audioManifest.length;
+  section.hidden = false;
+  section.innerHTML = `
+    <div class="audio-player">
+      <button id="audio-play-btn" class="audio-play-btn" title="Play / pause">▶</button>
+      <div class="audio-progress-wrap">
+        <input id="audio-seek" class="audio-seek" type="range" min="0" max="10000" value="0" step="1" />
+        <div class="audio-player-meta">
+          <span id="audio-time" class="audio-time">0:00 / 0:00</span>
+          <span class="audio-info">${totalPassages} passages · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""}</span>
+        </div>
+      </div>
+      <button id="audio-regen-btn" class="audio-regen-btn" title="Regenerate audio for entire chapter">↺</button>
+    </div>
+  `;
+  initAudioPlayer();
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -96,6 +310,8 @@ async function loadProject(projectId, chapterId = null) {
 function renderProject(payload) {
   $("project-meta").textContent = payload.config.title;
   $("project-select").value = payload.config.project_id;
+  state.audioManifest = payload.audio_manifest || null;
+  state.audioUrl = payload.audio_url || null;
   renderToc();
   const chapter = payload.chapters.find((c) => c.chapter_id === payload.selected_chapter_id);
   $("chapter-id").value = payload.selected_chapter_id || "ch01";
@@ -106,6 +322,7 @@ function renderProject(payload) {
   renderCharacters();
   renderAnnotationsPanel();
   renderTranscript();
+  renderAudioPlayer();
   renderCast();
 }
 
@@ -222,7 +439,7 @@ function renderCharacters() {
           <input class="character-aliases" value="${escapeAttr((character.aliases || []).join(", "))}" placeholder="aliases" />
           <input class="character-age" value="${escapeAttr(character.age || "")}" placeholder="age / life stage" />
           <input class="character-gender" value="${escapeAttr(character.gender || "")}" placeholder="gender / presentation" />
-          ${providerVoiceControl(voice?.provider_voice || "", "character-provider-voice")}
+          ${providerVoiceControl(voice?.provider_voice || "", "character-provider-voice", character)}
           <textarea class="character-personality" placeholder="Base personality / overall profile">${escapeHtml(character.personality || "")}</textarea>
           <textarea class="character-voice-notes" placeholder="Voice casting notes">${escapeHtml(character.voice_notes || "")}</textarea>
         </div>
@@ -246,20 +463,31 @@ function renderTranscript() {
 }
 
 function inlineAnnotationHtml(row, index) {
+  const chunkIndex = state.audioManifest != null ? (passageChunkMap[index] ?? -1) : -1;
+  const hasAudio = chunkIndex >= 0;
+  const regenBtn = hasAudio
+    ? `<button class="regen-chunk-btn" data-chunk="${chunkIndex}" title="Re-synthesize chunk ${chunkIndex}">↺</button>`
+    : "";
+  const ttsOpen = row.tts_text ? " open" : "";
   return `
     <article class="inline-annotation-item" data-index="${index}">
-      <div class="annotation-header">
+      <div class="annotation-header${hasAudio ? " has-audio" : ""}">
         <input class="ann-speaker" value="${escapeAttr(row.speaker || "Narrator")}" placeholder="speaker" />
         ${selectHtml("ann-emotion", emotions, row.emotion || "neutral")}
         ${selectHtml("ann-delivery", deliveries, row.delivery || "matter-of-fact")}
         ${selectHtml("ann-pace", paces, row.pace || "medium")}
         <input class="ann-intensity" type="number" min="1" max="5" value="${Number(row.intensity || 3)}" title="intensity 1–5" />
+        ${regenBtn}
       </div>
       <div class="annotation-script">
         <textarea class="ann-text">${escapeHtml(row.text || "")}</textarea>
         <div class="script-pause">⏸ <input class="ann-pause" type="number" min="0" value="${Number(row.pause_after_ms || 350)}" /> ms</div>
       </div>
       <input class="ann-rationale" value="${escapeAttr(row.rationale || "")}" placeholder="rationale" />
+      <details class="ann-tts-details"${ttsOpen}>
+        <summary>TTS override</summary>
+        <textarea class="ann-tts-text" placeholder="Text sent to TTS (leave blank to use passage text). Use for phonetic substitution: e.g. 汪淼(Wāng Miǎo) or full pinyin.">${escapeHtml(row.tts_text || "")}</textarea>
+      </details>
     </article>
   `;
 }
@@ -291,6 +519,7 @@ function renderCast() {
   $("cast-list").innerHTML = Object.values(cast.assignments || {})
     .map((assignment) => {
       const voice = cast.voices?.[assignment.voice_id] || {};
+      const charProfile = state.memory?.characters?.[assignment.character] || null;
       return `
         <article class="item cast-item" data-character="${escapeAttr(assignment.character)}">
           <div class="item-head">
@@ -299,7 +528,7 @@ function renderCast() {
           </div>
           <div class="cast-grid">
             <input class="cast-voice-id" value="${escapeAttr(assignment.voice_id)}" placeholder="voice id" />
-            ${providerVoiceControl(voice.provider_voice || "")}
+            ${providerVoiceControl(voice.provider_voice || "", "cast-provider-voice", charProfile)}
             <textarea class="cast-reason" placeholder="reason">${escapeHtml(assignment.reason || "")}</textarea>
           </div>
         </article>
@@ -312,12 +541,76 @@ function characterCastAssignment(character) {
   return state.cast?.assignments?.[character] || null;
 }
 
-function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-voice") {
+function scoreVoiceForCharacter(voice, character) {
+  if (!character) return 0;
+  let score = 0;
+  const labels = voice.labels || {};
+  const voiceGender = (labels.gender || "").toLowerCase();
+  const charGender = (character.gender || "").toLowerCase();
+  const normalizeGender = (g) =>
+    /female|woman|girl|女/.test(g) ? "female" : /male|man|boy|男/.test(g) ? "male" : "";
+  const vg = normalizeGender(voiceGender);
+  const cg = normalizeGender(charGender);
+  if (vg && cg && vg === cg) score += 10;
+
+  const voiceAge = (labels.age || "").toLowerCase();
+  const charAge = (character.age || "").toLowerCase();
+  if (voiceAge && charAge) {
+    const ageGroups = [
+      [/child|teen|young|youth|adolescent|少年|少女|青少/, "young"],
+      [/middle.aged|adult|grown|中年|成年/, "middle"],
+      [/old|elder|senior|ancient|aged|老年|老/, "old"],
+    ];
+    const classify = (s) => {
+      for (const [re, label] of ageGroups) if (re.test(s)) return label;
+      return "";
+    };
+    if (classify(voiceAge) && classify(voiceAge) === classify(charAge)) score += 5;
+  }
+
+  const stopWords = new Set([
+    "a", "an", "the", "is", "are", "was", "were", "and", "or", "of", "to",
+    "in", "for", "with", "on", "at", "by", "from", "has", "have", "be",
+    "this", "that", "it", "its", "as", "but", "so",
+  ]);
+  const tokenize = (s) =>
+    (s || "")
+      .toLowerCase()
+      .replace(/[^\w\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2 && !stopWords.has(w));
+
+  const voiceTokens = new Set([
+    ...tokenize(labels.gender),
+    ...tokenize(labels.age),
+    ...tokenize(labels.accent),
+    ...tokenize(labels.description),
+    ...tokenize(labels.use_case),
+    ...tokenize(voice.name),
+  ]);
+  const charTokens = [
+    ...tokenize(character.personality),
+    ...tokenize(character.voice_notes),
+    ...tokenize(character.gender),
+    ...tokenize(character.age),
+  ];
+  for (const tok of charTokens) {
+    if (voiceTokens.has(tok)) score += 1;
+  }
+  return score;
+}
+
+function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-voice", character = null) {
   if (!state.elevenVoices.length) {
     return `<input class="${className}" value="${escapeAttr(selectedVoiceId)}" placeholder="provider voice / ElevenLabs voice id" />`;
   }
   const selectedExists = state.elevenVoices.some((voice) => voice.voice_id === selectedVoiceId);
-  const options = state.elevenVoices
+  const sorted = character
+    ? [...state.elevenVoices].sort(
+        (a, b) => scoreVoiceForCharacter(b, character) - scoreVoiceForCharacter(a, character)
+      )
+    : state.elevenVoices;
+  const options = sorted
     .map((voice) => {
       const labels = voice.labels || {};
       const detail = [labels.gender, labels.age, labels.accent].filter(Boolean).join(", ");
@@ -328,13 +621,19 @@ function providerVoiceControl(selectedVoiceId = "", className = "cast-provider-v
   const current = selectedVoiceId && !selectedExists
     ? `<option value="${escapeAttr(selectedVoiceId)}" selected>${escapeHtml(selectedVoiceId)}</option>`
     : "";
-  return `<select class="${className}"><option value="">Select ElevenLabs voice...</option>${current}${options}</select>`;
+  const select = `<select class="${className}"><option value="">Select ElevenLabs voice...</option>${current}${options}</select>`;
+  return `<div class="voice-select-wrap">${select}<button class="voice-preview-btn" title="Preview selected voice">▶</button></div>`;
 }
 
 function renderElevenVoices() {
   $("voice-library").innerHTML = state.elevenVoices
     .slice(0, 40)
-    .map((voice) => `<button class="voice-pill" data-voice-id="${escapeAttr(voice.voice_id)}">${escapeHtml(voice.name || voice.voice_id)}</button>`)
+    .map((voice) => {
+      const previewBtn = voice.preview_url
+        ? `<button class="voice-preview-btn" data-voice-id="${escapeAttr(voice.voice_id)}" title="Preview voice">▶</button>`
+        : "";
+      return `<span class="voice-pill-group"><button class="voice-pill" data-voice-id="${escapeAttr(voice.voice_id)}" title="Copy voice ID">${escapeHtml(voice.name || voice.voice_id)}</button>${previewBtn}</span>`;
+    })
     .join("");
 }
 
@@ -547,6 +846,7 @@ function collectAnnotations() {
       chapter_id: state.selectedChapterId,
       index,
       text: item.querySelector(".ann-text").value,
+      tts_text: item.querySelector(".ann-tts-text")?.value || "",
       speaker: item.querySelector(".ann-speaker").value || "Narrator",
       emotion: item.querySelector(".ann-emotion").value,
       delivery: item.querySelector(".ann-delivery").value,
@@ -711,12 +1011,35 @@ async function saveCharacterVoiceAssignments() {
   });
 }
 
+async function runAnalyzeAnnotateCast() {
+  if (!state.project) return;
+  setBusy(true, "Analyzing", "Updating plot, character memory, and story understanding...");
+  setStatus("Analyze + Annotate + Cast started");
+  try {
+    const analyzePayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ step: "analyze", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
+    });
+    setBusy(true, "Casting Voices", "Assigning voices to characters and speakers...");
+    const castPayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ step: "cast", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
+    });
+    await loadProject(state.project.project_id, state.selectedChapterId);
+    const llm = analyzePayload.llm
+      ? ` with ${analyzePayload.llm.provider}${analyzePayload.llm.model ? ` (${analyzePayload.llm.model})` : ""}`
+      : "";
+    setStatus(`Analyze + Annotate + Cast complete${llm}`);
+  } catch (error) {
+    setStatus(error.message);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function runStep(step) {
   if (!state.project) return;
   const busyCopy = {
-    analyze: ["Analyzing", "Updating plot, character memory, and story understanding..."],
-    annotate: ["Annotating", "Waiting on narration annotations, speaker labels, and emotion tags..."],
-    cast: ["Casting Voices", "Assigning voices to characters and speakers..."],
     synthesize: ["Generating", "Creating narration output..."],
   }[step] || ["Working", "Processing..."];
   setBusy(true, busyCopy[0], busyCopy[1]);
@@ -939,9 +1262,7 @@ function wireEvents() {
   $("save-characters").addEventListener("click", saveCharacterProfiles);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
-  $("run-analyze").addEventListener("click", () => runStep("analyze"));
-  $("run-annotate").addEventListener("click", () => runStep("annotate"));
-  $("run-cast").addEventListener("click", () => runStep("cast"));
+  $("run-pipeline").addEventListener("click", runAnalyzeAnnotateCast);
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
@@ -967,6 +1288,35 @@ function wireEvents() {
     navigator.clipboard?.writeText(event.target.dataset.voiceId);
     setStatus(`Copied ${event.target.dataset.voiceId}`);
   });
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest(".voice-preview-btn");
+    if (!btn) return;
+    event.stopPropagation();
+    const voiceId = btn.dataset.voiceId
+      || btn.closest(".voice-select-wrap")?.querySelector("select")?.value;
+    if (voiceId) playVoicePreview(voiceId);
+  });
+  document.addEventListener("click", (event) => {
+    const btn = event.target.closest(".regen-chunk-btn");
+    if (!btn) return;
+    event.stopPropagation();
+    regenerateChunk(Number(btn.dataset.chunk));
+  });
+  $("inline-annotations").addEventListener("click", (event) => {
+    const tag = event.target.tagName;
+    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
+    const item = event.target.closest(".inline-annotation-item");
+    if (!item || !chapterAudio || !audioTimings.length) return;
+    const index = Number(item.dataset.index);
+    const timing = audioTimings[index];
+    if (!timing) return;
+    chapterAudio.currentTime = timing.start;
+    if (chapterAudio.paused) {
+      chapterAudio.play();
+      const btn = $("audio-play-btn");
+      if (btn) btn.textContent = "⏸";
+    }
+  });
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => {
       document.querySelectorAll(".tab").forEach((node) => node.classList.remove("active"));
@@ -991,6 +1341,14 @@ function wireEvents() {
 
 function clearChapterUi() {
   state.selectedChapterId = null;
+  state.audioManifest = null;
+  state.audioUrl = null;
+  if (chapterAudio) {
+    chapterAudio.pause();
+    chapterAudio = null;
+  }
+  audioTimings = [];
+  activePassageIndex = -1;
   state.chapters = [];
   state.annotations = [];
   state.annotatedText = "";
