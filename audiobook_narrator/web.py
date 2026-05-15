@@ -357,7 +357,7 @@ class NarratorWebApp:
                 )
                 passages = [passage for rows in annotated.values() for passage in rows]
                 score_langfuse_current_trace(evaluate_annotations(passages))
-                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
+                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider)
             flush_langfuse()
             return {
                 "ok": True,
@@ -366,7 +366,8 @@ class NarratorWebApp:
                 "llm": provider_summary(provider),
             }
         if step == "cast":
-            cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices())
+            provider = get_llm_provider(not body.get("no_openai"))
+            cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider)
             with langfuse_observation(
                 "audiobook-cast",
                 input={"project_id": project_id},

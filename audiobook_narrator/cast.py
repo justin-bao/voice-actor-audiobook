@@ -1,10 +1,43 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 
 from audiobook_narrator.models import Cast, CastAssignment, StoryMemory, Voice
-from audiobook_narrator.providers import ElevenLabsTTSProvider
+from audiobook_narrator.providers import ElevenLabsTTSProvider, LLMProvider
 from audiobook_narrator.storage import ProjectStore
+
+
+logger = logging.getLogger(__name__)
+
+
+CAST_SYSTEM_PROMPT = """You are a voice casting director for a Mandarin Chinese audiobook.
+
+You receive a list of characters with their biographical profiles and a catalog of available ElevenLabs voices.
+
+Assign exactly one voice from the catalog to each character. Optimise for:
+- Gender and age match
+- Personality and timbre match (commanding characters → authoritative or deep voices; tender characters → warm or gentle voices; scholarly → measured and clear; etc.)
+- Distinctiveness: avoid assigning the same voice to two different named characters when possible
+- Prefer voices with Chinese or Mandarin training (accent: Chinese, description or use_case mentions Chinese/Mandarin)
+- Assign "Narrator" to the clearest, most neutral storytelling voice available
+
+Return strict JSON:
+{
+  "assignments": [
+    {"character": "Narrator", "voice_id": "...", "reason": "one-sentence rationale"},
+    {"character": "CharacterName", "voice_id": "...", "reason": "one-sentence rationale"}
+  ]
+}
+
+Use only voice_id values that appear in the provided catalog. Include every character in your assignments list."""
+
+CAST_USER_TEMPLATE = """Characters:
+{characters_json}
+
+Available voices:
+{voices_json}"""
 
 
 DEFAULT_VOICES = {
@@ -47,17 +80,157 @@ DEFAULT_VOICES = {
 }
 
 
-def build_cast(store: ProjectStore, project_id: str, elevenlabs_voices: list[dict] | None = None) -> Cast:
+def build_cast(
+    store: ProjectStore,
+    project_id: str,
+    elevenlabs_voices: list[dict] | None = None,
+    provider: LLMProvider | None = None,
+) -> Cast:
     memory = store.load_memory(project_id)
-    existing = None
+    existing: Cast | None = None
     cast_path = store.paths(project_id).casts / "voices.json"
     if cast_path.exists():
         existing = store.read_json(cast_path, Cast)
     if elevenlabs_voices is None:
         elevenlabs_voices = load_elevenlabs_voices_if_configured()
-    cast = cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+
+    if provider is not None and not isinstance(provider, _HeuristicSentinel) and elevenlabs_voices:
+        try:
+            logger.info("Cast provider=llm characters=%d voices=%d", len(memory.characters), len(elevenlabs_voices))
+            cast = llm_cast_from_memory(memory, provider, elevenlabs_voices, existing)
+        except Exception as exc:
+            logger.warning("LLM casting failed, falling back to heuristic: %s", exc)
+            cast = cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+    else:
+        cast = cast_from_memory(memory, existing=existing, elevenlabs_voices=elevenlabs_voices)
+
     store.write_json(store.paths(project_id).casts / "voices.json", cast)
     return cast
+
+
+class _HeuristicSentinel:
+    """Marker — never used directly; keeps the isinstance check readable."""
+
+
+def llm_cast_from_memory(
+    memory: StoryMemory,
+    provider: LLMProvider,
+    elevenlabs_voices: list[dict],
+    existing: Cast | None = None,
+) -> Cast:
+    valid_voice_ids = {str(v.get("voice_id")) for v in elevenlabs_voices if v.get("voice_id")}
+
+    voices_payload = []
+    for v in elevenlabs_voices:
+        vid = v.get("voice_id")
+        if not vid:
+            continue
+        labels = v.get("labels") if isinstance(v.get("labels"), dict) else {}
+        entry: dict = {"voice_id": str(vid), "name": v.get("name") or ""}
+        for key in ("gender", "age", "accent", "description", "use_case"):
+            val = labels.get(key)
+            if val:
+                entry[key] = str(val)
+        voices_payload.append(entry)
+
+    chars_payload: list[dict] = [
+        {"name": "Narrator", "gender": "", "age": "", "personality": "Literary narrator", "voice_notes": "Clear, warm, neutral, even pacing"},
+    ]
+    for name, profile in memory.characters.items():
+        chars_payload.append({
+            "name": name,
+            "gender": profile.gender or "",
+            "age": profile.age or "",
+            "personality": (profile.personality or "")[:300],
+            "voice_notes": (profile.voice_notes or "")[:200],
+            "role": (profile.role_in_plot or "")[:100],
+        })
+    chars_payload.append(
+        {"name": "Unknown Speaker", "gender": "", "age": "", "personality": "Unidentified speaker", "voice_notes": "Neutral fallback"},
+    )
+
+    user = CAST_USER_TEMPLATE.format(
+        characters_json=json.dumps(chars_payload, ensure_ascii=False, indent=2),
+        voices_json=json.dumps(voices_payload, ensure_ascii=False, indent=2),
+    )
+
+    result = provider.complete_json(CAST_SYSTEM_PROMPT, user)
+
+    voice_index = {str(v.get("voice_id")): v for v in elevenlabs_voices if v.get("voice_id")}
+    cast = Cast(voices={})
+    used_voice_ids: set[str] = set()
+    assigned: set[str] = set()
+
+    for row in result.get("assignments", []):
+        character = str(row.get("character") or "").strip()
+        voice_id = str(row.get("voice_id") or "").strip()
+        reason = str(row.get("reason") or "").strip()
+        if not character:
+            continue
+        # Preserve a manually-set assignment that already has a real provider voice
+        if existing and character in existing.assignments:
+            if assignment_has_provider_voice(existing.assignments[character], existing):
+                cast.assignments[character] = existing.assignments[character]
+                _register_voice(cast, existing.assignments[character].voice_id, voice_index, character)
+                used_voice_ids.add(existing.assignments[character].voice_id)
+                assigned.add(character)
+                continue
+        if voice_id not in valid_voice_ids:
+            logger.warning("Cast LLM returned unknown voice_id=%r for character=%r, will use heuristic", voice_id, character)
+            continue
+        cast.assignments[character] = CastAssignment(character=character, voice_id=voice_id, reason=reason)
+        _register_voice(cast, voice_id, voice_index, character)
+        used_voice_ids.add(voice_id)
+        assigned.add(character)
+
+    # Fill any characters the LLM missed or returned invalid voice IDs for
+    all_characters = {"Narrator", "Unknown Speaker", *memory.characters.keys()}
+    for character in sorted(all_characters - assigned):
+        if existing and character in existing.assignments:
+            if assignment_has_provider_voice(existing.assignments[character], existing):
+                cast.assignments[character] = existing.assignments[character]
+                _register_voice(cast, existing.assignments[character].voice_id, voice_index, character)
+                continue
+        profile = memory.characters.get(character)
+        gender = profile.gender if profile else ""
+        age = profile.age if profile else ""
+        selected = select_elevenlabs_voice(gender, age, elevenlabs_voices, used_voice_ids)
+        if selected:
+            voice_id = str(selected.get("voice_id"))
+            notes = (profile.voice_notes or profile.personality) if profile else ""
+            cast.assignments[character] = CastAssignment(
+                character=character,
+                voice_id=voice_id,
+                reason=f"Heuristic fallback. {age} {gender}. {notes}".strip(". "),
+            )
+            _register_voice(cast, voice_id, voice_index, character)
+            used_voice_ids.add(voice_id)
+        else:
+            fallback_id = "narrator_cn_warm" if character == "Narrator" else "neutral_cn_young"
+            cast.voices.update(DEFAULT_VOICES)
+            cast.assignments[character] = CastAssignment(
+                character=character,
+                voice_id=fallback_id,
+                reason="Default fallback voice.",
+            )
+
+    return cast
+
+
+def _register_voice(cast: Cast, voice_id: str, voice_index: dict[str, dict], character: str) -> None:
+    if voice_id in cast.voices:
+        return
+    v = voice_index.get(voice_id, {})
+    labels = v.get("labels") if isinstance(v.get("labels"), dict) else {}
+    cast.voices[voice_id] = Voice(
+        voice_id=voice_id,
+        provider_voice=voice_id,
+        language="zh",
+        gender=str(labels.get("gender") or "") or None,
+        age=str(labels.get("age") or "") or None,
+        timbre=str(labels.get("description") or v.get("name") or ""),
+        suitable_for=[character],
+    )
 
 
 def cast_from_memory(
