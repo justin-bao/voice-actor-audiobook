@@ -26,16 +26,19 @@
           <button id="delete-book" class="icon-button danger" title="Delete selected book">🗑</button>
         </div>
 
-        <div class="side-actions">
-          <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
-          <button id="open-generate-modal" title="Generate narration for multiple chapters">▶ Generate</button>
-          <button id="run-pipeline" title="Analyze and annotate every chapter that still needs work">Analyze + Annotate</button>
-          <button id="download-book-audio" title="Download all generated chapters as a single MP3">⬇ Download MP3</button>
-          <label class="mode-label" for="narration-mode">Narration mode</label>
+        <div class="narration-mode-wrap">
+          <label class="field-label" for="narration-mode">Narration mode</label>
           <select id="narration-mode" title="Single narrator performs all voices; or assign a distinct voice per character">
             <option value="multi_voice">Multi-voice cast</option>
             <option value="single_narrator">Single narrator</option>
           </select>
+        </div>
+
+        <div class="side-actions">
+          <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
+          <button id="run-pipeline" title="Analyze and annotate every chapter that needs work">Annotate</button>
+          <button id="open-generate-modal" title="Generate narration for multiple chapters">▶ Generate</button>
+          <button id="download-book-audio" title="Download all generated chapters as a single MP3">⬇ Download MP3</button>
         </div>
 
         <div class="toc-section">
@@ -56,27 +59,20 @@
             <h2>Select a chapter</h2>
             <p>Choose a chapter from the table of contents to edit transcript text, annotations, and generated narration.</p>
           </div>
+          <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
+          <input id="chapter-id" hidden />
           <div class="toolbar">
-            <div class="chapter-fields">
-              <label>
-                <span>Chapter ID</span>
-                <input id="chapter-id" placeholder="chapter-id" />
-              </label>
-              <label>
-                <span>Chapter Title</span>
-                <input id="chapter-title" placeholder="Chapter title" />
-              </label>
-            </div>
+            <label class="chapter-title-label">
+              <span>Chapter</span>
+              <input id="chapter-title" placeholder="Chapter title" />
+            </label>
             <div class="toolbar-actions">
-              <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
-              <button id="import-file" title="Import one or more chapters">⇧ Import</button>
-              <button id="analyze-chapter" title="Analyze this chapter and update story memory">Analyze</button>
-              <button id="annotate-chapter" title="Annotate this chapter">Annotate</button>
+              <button id="annotate-chapter" title="Analyze and annotate this chapter">Annotate</button>
               <button id="reset-annotations" title="Clear all annotations for this chapter">Clear</button>
               <button id="synthesize" title="Generate narration">▶ Generate</button>
-              <button id="save-chapter" class="toolbar-save" title="Save chapter page">💾 Save</button>
-              <button id="toggle-inspector" class="toolbar-details" title="Open memory, character, and voice drawer">☰ Details</button>
+              <button id="save-chapter" class="toolbar-save" title="Save chapter">💾 Save</button>
             </div>
+            <button id="toggle-inspector" class="icon-button" title="Open details drawer">☰</button>
           </div>
           <div id="audio-player-section" class="audio-player-section" hidden></div>
           <div id="transcript-wrap" class="editor-view active">
@@ -89,6 +85,7 @@
         <section class="inspector-band">
           <div class="drawer-head">
             <strong>Details</strong>
+            <button id="save-inspector" title="Save memory, characters, and voices">Save</button>
             <button id="close-inspector" class="icon-button" title="Collapse drawer">×</button>
           </div>
           <nav class="tabs" aria-label="Inspector views">
@@ -99,8 +96,7 @@
 
           <div id="memory-panel" class="panel active">
             <div class="panel-heading">
-              <h2>Understanding</h2>
-              <button id="save-memory" title="Save memory">Save</button>
+              <h2>Memory</h2>
             </div>
             <div class="memory-scope book-memory-scope">
               <div class="memory-scope-head">
@@ -136,12 +132,9 @@
 
             <div id="characters-panel" class="panel">
               <div class="panel-heading">
-              <h2>Book Character Profiles</h2>
-              <div class="cluster">
+                <h2>Book Character Profiles</h2>
                 <button id="add-character" title="Add character">＋</button>
-                <button id="save-characters" title="Save characters">Save</button>
               </div>
-            </div>
             <p class="panel-note">Overall character profiles are for stable casting decisions. Chapter-specific personality shifts live in Selected Chapter Memory.</p>
             <div id="characters-list" class="item-list"></div>
           </div>
@@ -149,10 +142,7 @@
           <div id="voices-panel" class="panel">
             <div class="panel-heading">
               <h2>Voices</h2>
-              <div class="cluster">
-                <button id="add-cast" title="Add voice assignment">＋</button>
-                <button id="save-cast" title="Save voice cast">Save</button>
-              </div>
+              <button id="add-cast" title="Add voice assignment">＋</button>
             </div>
             <div id="voice-library" class="voice-library"></div>
             <div id="cast-list" class="item-list"></div>
@@ -186,7 +176,7 @@
         <div class="modal-actions">
           <button id="cancel-bulk-import" type="button">Cancel</button>
           <button id="import-source-only" type="button">Add Source Text Only</button>
-          <button id="confirm-bulk-import" type="button">Analyze + Annotate</button>
+          <button id="confirm-bulk-import" type="button">Annotate</button>
         </div>
       </div>
     </dialog>

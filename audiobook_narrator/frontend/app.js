@@ -905,7 +905,8 @@ async function saveChapterPage({ silent = false } = {}) {
     await saveCharacterVoiceAssignments();
     if (!silent) {
       await loadProject(state.project.project_id, state.selectedChapterId);
-      setStatus("Chapter page saved");
+      setStatus("Saved");
+      showSavedIndicator();
     }
   } catch (error) {
     setStatus(`Save failed: ${error.message}`);
@@ -1197,11 +1198,11 @@ async function runAnalyzeAnnotateBook() {
   if (!state.project) return;
   const pending = state.chapters.filter((chapter) => !chapter.analyzed || !chapter.annotated);
   if (!pending.length) {
-    setStatus("All chapters are already analyzed and annotated");
+    setStatus("All chapters are already annotated");
     return;
   }
   state.pipelineCanceled = false;
-  setStatus(`Analyze + Annotate started for ${pending.length} chapter${pending.length === 1 ? "" : "s"}`);
+  setStatus(`Annotate started for ${pending.length} chapter${pending.length === 1 ? "" : "s"}`);
   try {
     for (const chapter of pending) {
       if (state.pipelineCanceled) break;
@@ -1232,12 +1233,12 @@ async function runAnalyzeAnnotateBook() {
         renderToc();
         await runChapterStep("annotate", chapter.chapter_id, { reload: false, controller: state.busyJobs.get(chapter.chapter_id)?.controller });
         removeBusyJob(chapter.chapter_id);
-        updateLocalChapterState(chapter.chapter_id, { annotated: true, pipeline_state: "complete", pipeline_message: "Analysis and annotation complete." });
+        updateLocalChapterState(chapter.chapter_id, { annotated: true, pipeline_state: "complete", pipeline_message: "Annotation complete." });
       }
       renderToc();
     }
     await loadProject(state.project.project_id, state.selectedChapterId);
-    setStatus(state.pipelineCanceled ? "Analyze + Annotate canceled" : "Analyze + Annotate complete");
+    setStatus(state.pipelineCanceled ? "Annotate canceled" : "Annotate complete");
   } catch (error) {
     const failed = [...state.busyJobs.values()].find((job) => job.chapterId)?.chapterId;
     if (failed) {
@@ -1250,6 +1251,48 @@ async function runAnalyzeAnnotateBook() {
     state.busyJobs.clear();
     renderBusyJobs();
   }
+}
+
+async function annotateCurrentChapter() {
+  if (!state.project || !state.selectedChapterId) return;
+  const chapter = state.chapters.find((c) => c.chapter_id === state.selectedChapterId);
+  if (!chapter?.analyzed) {
+    await runChapterStep("analyze");
+    if (!state.project || !state.selectedChapterId) return;
+  }
+  await runChapterStep("annotate");
+}
+
+async function saveInspector() {
+  if (!state.project) return;
+  try {
+    const memory = collectMemory();
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/memory`, {
+      method: "POST",
+      body: JSON.stringify(memory),
+    });
+    state.memory = memory;
+    if (state.selectedChapterId) {
+      const chapterMemory = collectChapterMemory();
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapter-memory/${encodeURIComponent(state.selectedChapterId)}`, {
+        method: "POST",
+        body: JSON.stringify(chapterMemory),
+      });
+      state.chapterMemory = chapterMemory;
+    }
+    await saveCharacterVoiceAssignments();
+    renderCharacters();
+    setStatus("Saved");
+  } catch (error) {
+    setStatus(`Save failed: ${error.message}`);
+  }
+}
+
+function showSavedIndicator() {
+  const btn = $("save-chapter");
+  if (!btn) return;
+  btn.classList.add("is-saved");
+  setTimeout(() => btn.classList.remove("is-saved"), 2000);
 }
 
 async function runChapterStep(step, chapterId = state.selectedChapterId, { reload = true, controller = null } = {}) {
@@ -1687,11 +1730,9 @@ function wireEvents() {
     await reorderChapters(ids);
   });
   $("save-chapter").addEventListener("click", () => saveChapterPage());
+  $("save-inspector").addEventListener("click", saveInspector);
   $("reset-annotations").addEventListener("click", resetAnnotations);
   $("delete-book").addEventListener("click", deleteCurrentBook);
-  $("save-memory").addEventListener("click", saveMemory);
-  $("save-characters").addEventListener("click", saveCharacterProfiles);
-  $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
   $("run-pipeline").addEventListener("click", runAnalyzeAnnotateBook);
   $("narration-mode").addEventListener("change", async () => {
@@ -1709,8 +1750,7 @@ function wireEvents() {
     }
   });
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
-  $("analyze-chapter").addEventListener("click", () => runChapterStep("analyze"));
-  $("annotate-chapter").addEventListener("click", () => runChapterStep("annotate"));
+  $("annotate-chapter").addEventListener("click", annotateCurrentChapter);
   $("open-generate-modal").addEventListener("click", openGenerateModal);
   $("start-generate").addEventListener("click", startGenerate);
   $("generate-select-all").addEventListener("click", () => {
@@ -1724,7 +1764,6 @@ function wireEvents() {
   });
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
-  $("import-file").addEventListener("click", () => $("file-input").click());
   $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
   $("download-book-audio").addEventListener("click", () => {
     if (!state.project) return;
