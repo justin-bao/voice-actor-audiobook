@@ -76,13 +76,17 @@ textarea:focus-visible {
 .app-shell {
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
-  height: 100vh;
+  min-height: 100vh;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
   padding: 18px;
   color: #eef7f3;
   background: var(--side);
@@ -402,7 +406,7 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: minmax(420px, 1.1fr) minmax(380px, 0.9fr);
   min-width: 0;
-  height: 100vh;
+  min-height: 100vh;
 }
 
 .workspace.inspector-collapsed {
@@ -433,6 +437,7 @@ textarea:focus-visible {
   border-right: 1px solid var(--line);
   background: #f5f7f2;
   position: relative;
+  min-height: 100vh;
 }
 
 .toolbar {
@@ -1092,6 +1097,7 @@ button.armed {
 
   .sidebar {
     position: static;
+    height: auto;
   }
 
   .workspace {
