@@ -471,12 +471,14 @@ function renderToc() {
         <span class="toc-handle" aria-hidden="true">☰</span>
         <button class="toc-title" title="${escapeAttr(chapter.title || chapter.chapter_id)}">
           ${index + 1}. ${escapeHtml(chapter.title || chapter.chapter_id)}
-          <span class="toc-state" title="${escapeAttr(tocState.title)}">
-            ${tocState.html}
-          </span>
         </button>
         ${busyJob?.cancellable ? `<button class="toc-cancel" title="Cancel analysis from this chapter onward" data-chapter-id="${escapeAttr(chapter.chapter_id)}">×</button>` : chapterStatusIcon(chapter, busyJob)}
-        <button class="toc-delete danger" title="Delete this chapter">🗑</button>
+        <div class="toc-menu-wrap">
+          <button class="toc-menu-btn" title="Chapter actions">⋯</button>
+          <div class="toc-menu-dropdown">
+            <button class="toc-menu-item toc-menu-delete" title="Delete this chapter">Delete chapter</button>
+          </div>
+        </div>
       </li>
     `;
     })
@@ -1077,35 +1079,28 @@ async function resetAnnotations() {
   }
 }
 
-async function deleteChapterById(chapterId, button) {
-  if (!state.project || !chapterId || !button) return;
-  if (state.pendingDeleteChapterId !== chapterId) {
-    state.pendingDeleteChapterId = chapterId;
-    button.textContent = "!";
-    button.classList.add("armed");
-    setStatus(`Click Confirm Delete to remove ${chapterId}`);
-    return;
-  }
-  button.disabled = true;
+async function deleteChapterById(chapterId) {
+  if (!state.project || !chapterId) return;
+  closeAllTocMenus();
   setStatus(`Deleting ${chapterId}...`);
   try {
-    const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/delete-chapter/${encodeURIComponent(chapterId)}`, {
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/delete-chapter/${encodeURIComponent(chapterId)}`, {
       method: "POST",
       body: JSON.stringify({}),
     });
-    resetDeleteButton();
     await loadProject(state.project.project_id);
     setStatus(`Deleted ${chapterId}`);
   } catch (error) {
     setStatus(`Delete failed: ${error.message}`);
-  } finally {
-    button.disabled = false;
   }
 }
 
 async function deleteCurrentChapter() {
-  const item = document.querySelector(`.toc-item[data-chapter-id="${CSS.escape(state.selectedChapterId || "")}"]`);
-  await deleteChapterById(state.selectedChapterId, item?.querySelector(".toc-delete"));
+  await deleteChapterById(state.selectedChapterId);
+}
+
+function closeAllTocMenus() {
+  document.querySelectorAll(".toc-menu-wrap.open").forEach((wrap) => wrap.classList.remove("open"));
 }
 
 async function deleteCurrentBook() {
@@ -1615,14 +1610,23 @@ function wireEvents() {
       cancelPipelineFromChapter(cancelButton.dataset.chapterId);
       return;
     }
-    const deleteButton = event.target.closest(".toc-delete");
-    if (deleteButton) {
-      const item = deleteButton.closest(".toc-item");
-      deleteChapterById(item?.dataset.chapterId, deleteButton);
+    const menuBtn = event.target.closest(".toc-menu-btn");
+    if (menuBtn) {
+      const wrap = menuBtn.closest(".toc-menu-wrap");
+      const isOpen = wrap.classList.contains("open");
+      closeAllTocMenus();
+      if (!isOpen) wrap.classList.add("open");
+      return;
+    }
+    const deleteItem = event.target.closest(".toc-menu-delete");
+    if (deleteItem) {
+      const tocItem = deleteItem.closest(".toc-item");
+      deleteChapterById(tocItem?.dataset.chapterId);
       return;
     }
     const item = event.target.closest(".toc-item");
     if (!item || !state.project) return;
+    if (event.target.closest(".toc-menu-wrap")) return;
     loadProject(state.project.project_id, item.dataset.chapterId);
   });
   $("toc-list").addEventListener("dragstart", (event) => {
@@ -1727,6 +1731,9 @@ function wireEvents() {
     event.stopPropagation();
     regenerateChunk(Number(btn.dataset.chunk));
   });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".toc-menu-wrap")) closeAllTocMenus();
+  });
   $("inline-annotations").addEventListener("click", (event) => {
     const tag = event.target.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || tag === "BUTTON") return;
@@ -1812,10 +1819,7 @@ function clearChapterUi() {
 
 function resetDeleteButton() {
   state.pendingDeleteChapterId = null;
-  document.querySelectorAll(".toc-delete").forEach((button) => {
-    button.textContent = "🗑";
-    button.classList.remove("armed");
-  });
+  closeAllTocMenus();
 }
 
 function resetClearButton() {

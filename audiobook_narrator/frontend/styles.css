@@ -320,25 +320,71 @@ textarea:focus-visible {
   animation: spin 0.8s linear infinite;
 }
 
-.toc-delete {
+.toc-menu-wrap {
+  position: relative;
+}
+
+.toc-menu-btn {
   width: 28px;
   min-height: 28px;
   padding: 0;
   background: transparent;
-  font-size: 15px;
+  border-color: transparent;
+  font-size: 18px;
+  letter-spacing: -2px;
+  color: #9db2aa;
   line-height: 1;
+}
+
+.toc-menu-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: transparent;
+  color: #eef7f3;
+}
+
+.toc-menu-dropdown {
+  display: none;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+  background: #1e3a34;
+  border: 1px solid #3c594f;
+  border-radius: 6px;
+  padding: 4px;
+  min-width: 148px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.toc-menu-wrap.open .toc-menu-dropdown {
+  display: block;
+}
+
+.toc-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  padding: 7px 10px;
+  color: #eef7f3;
+  font-size: 13px;
+  min-height: 0;
+}
+
+.toc-menu-item:hover {
+  background: #2a4a42;
   border-color: transparent;
 }
 
-.toc-delete:hover {
-  border-color: var(--accent);
-  background: rgba(166, 45, 54, 0.12);
+.toc-menu-delete {
+  color: #ffd6d1;
 }
 
-.toc-delete.armed {
-  background: var(--danger);
-  color: #fff;
-  border-color: var(--danger);
+.toc-menu-delete:hover {
+  background: rgba(166, 45, 54, 0.3);
+  border-color: transparent;
 }
 
 .sidebar-resize-handle {
