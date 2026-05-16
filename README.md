@@ -146,6 +146,59 @@ audio/
   <chapter-id>.parts.json       per-chunk manifest: speaker, voice, emotion, delivery, path
 ```
 
+## Synthesis
+
+The synthesis step converts annotated passages into audio using the configured TTS backend. The ElevenLabs backend (the primary production path) uses the `/text-to-dialogue/stream` API, which is designed for multi-speaker scenes and accepts an ordered list of `(text, voice_id)` inputs per request.
+
+### Chunking
+
+ElevenLabs `/text-to-dialogue` has two hard limits per API call:
+
+- **1,900 characters** of tagged text per request
+- **10 unique voice IDs** per request
+
+`_dialogue_chunks()` walks the passage list in order and starts a new chunk whenever either limit would be exceeded. Each chunk is sent as a separate API call; the resulting MP3 audio segments are written to `audio/<chapter-id>_000.mp3`, `_001.mp3`, etc., and then concatenated into the final `<chapter-id>.mp3`.
+
+The per-chunk manifest (`<chapter-id>.parts.json`) records every passage: its speaker, voice ID, emotion, delivery, audio tags, display text length, and the path to its chunk file. This manifest drives the audio-player's passage timeline in the UI.
+
+### Pauses
+
+ElevenLabs v3 does not honour SSML `<break>` tags. Instead, pauses are controlled through **inline audio tags** embedded directly in the text string: `[short pause]`, `[pause]`, and `[long pause]`.
+
+The passage model's `pause_after_ms` field records the intended trailing silence in milliseconds. During synthesis, `_passage_input()` converts this value to the closest ElevenLabs tag and appends it to the passage text unless the annotated text already ends with a pause tag:
+
+| `pause_after_ms` range | Appended tag |
+|---|---|
+| < 400 ms | `[short pause]` |
+| 400–899 ms | `[pause]` |
+| ≥ 900 ms | `[long pause]` |
+
+Defaults:
+
+| Source | Value |
+|---|---|
+| `Passage` model default | 700 ms → `[pause]` |
+| LLM annotation fallback (unparseable value) | 700 ms → `[pause]` |
+| Heuristic: ends in `。！？` | 1 300 ms → `[long pause]` |
+| Heuristic: other passage endings | 700 ms → `[pause]` |
+
+**Inter-chunk pauses:** Because ElevenLabs processes each chunk as an independent audio stream, the natural pause generated for the last passage of one chunk may be shorter than expected once the files are concatenated. At each chunk boundary, `_dialogue_chunks()` upgrades the final passage's trailing pause to `[long pause]`, ensuring an audible gap between the two audio segments.
+
+Annotators (LLM and heuristic) also embed inline pause tags **within** passage text at the point where the pause should occur — for example `她沉默了。[long pause] 然后她转身离去。` — giving the synthesis model the same cues a script supervisor would mark on paper.
+
+### Narration modes
+
+| Mode | Behaviour |
+|---|---|
+| `multi_voice` | Each character is assigned a distinct ElevenLabs voice. The cast is built by the LLM from character biographies and voice library metadata. |
+| `single_narrator` | One voice performs all roles. The annotator substitutes voice-switching with delivery directions — pace, intensity, audio tags, register shifts — so the single voice conveys each character's personality through performance rather than timbre. |
+
+The mode is stored on the project config and passed through the full pipeline (analyze → annotate → cast → synthesize). Switching modes and re-annotating will rewrite annotations for the new style.
+
+### Regenerating a chunk
+
+Individual chunks can be re-synthesized from the UI (↺ button on each passage) or the API (`POST /api/projects/{id}/audio/{chapter_id}/regenerate-chunk`). This sends only that chunk's passages to ElevenLabs and splices the new audio back into the combined file without re-running the full chapter.
+
 ## Providers
 
 By default, the pipeline runs in `heuristic` mode without network access — character names are detected by regex, summaries are the first 260 characters of chapter text, and performance direction is derived from punctuation and emotion markers. For full literary understanding and directed narration, configure an LLM:
@@ -203,6 +256,52 @@ The ElevenLabs backend writes MP3 chunk files under `audio/` and a `.parts.json`
 - `.docx` — supported in the web importer.
 - `.pdf` — supported when installed with `.[pdf]`.
 - `.epub` — supported when installed with `.[epub]`.
+
+## Web UI
+
+The Studio UI (`audiobook-narrator-web`) exposes the full pipeline through a browser interface.
+
+### Sidebar
+
+| Control | Function |
+|---|---|
+| Book selector + ＋ | Create and switch between book projects |
+| ✎ / 🗑 | Rename or delete the selected book |
+| Import | Import one or more chapter files (`.txt`, `.md`, `.docx`, `.pdf`, `.epub`) |
+| ▶ Generate | Open the batch generation modal — select individual chapters and synthesize them in parallel |
+| Analyze + Annotate | Run the sequential analysis-then-annotation pipeline for all unprocessed chapters |
+| ⬇ Download MP3 | Open the download modal — select which chapters to include and download the full book as a concatenated MP3 |
+| Narration mode | Toggle between Multi-voice cast and Single narrator; takes effect on the next annotate/synthesize run |
+| Contents list | Chapter TOC with drag-to-reorder and per-chapter status badges |
+
+**Chapter status badges** (always visible in the TOC):
+
+| Badge | Meaning |
+|---|---|
+| ♪ (gold) | Audio has been generated for this chapter |
+| ✓ (green) | Chapter has been annotated |
+| A (blue) | Chapter has been analyzed (memory exists) |
+| ⏸ / — | Pipeline paused or canceled at this chapter |
+| ! (red) | Analysis or annotation failed |
+| spinning | Currently being processed |
+
+### Toolbar
+
+The chapter toolbar provides single-chapter operations: **Analyze**, **Annotate**, **Clear** (reset annotations and audio), **▶ Generate** (synthesize this chapter), **💾 Save**, and **☰ Details** (open the inspector drawer).
+
+### Inspector drawer
+
+Three tabs:
+
+**Memory** — Book-level `StoryMemory` (plot summary, current state, themes, pronunciation notes) and the selected chapter's `ChapterMemory` (local plot, state, chapter-specific themes, character changes during this chapter).
+
+**Characters** — Book-level character profiles. Edits here update the stable casting baseline. Chapter-specific emotional shifts belong in the Memory tab's character changes section.
+
+**Voices** — Voice cast assignments (character → ElevenLabs voice ID) and a voice library panel for browsing and previewing available voices.
+
+### Annotation view
+
+When a chapter has been annotated, the editor switches from a plain textarea to an inline annotation view showing each passage as an editable row with controls for speaker, emotion, delivery, pace, intensity, pause duration, and TTS override text. Clicking a passage during audio playback seeks to that position.
 
 ## Design Notes
 

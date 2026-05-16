@@ -451,7 +451,7 @@ def normalize_pause(value: object) -> int:
     try:
         return max(0, int(value))
     except (TypeError, ValueError):
-        return 350
+        return 700
 
 
 def heuristic_passage(chapter_id: str, index: int, text: str, memory: StoryMemory) -> Passage:
@@ -471,7 +471,7 @@ def heuristic_passage(chapter_id: str, index: int, text: str, memory: StoryMemor
         delivery=delivery,
         pace=pace,
         intensity=4 if emotion in {Emotion.angry, Emotion.fearful, Emotion.urgent} else 3,
-        pause_after_ms=650 if text.endswith(("。", "！", "？")) else 300,
+        pause_after_ms=1300 if text.endswith(("。", "！", "？")) else 700,
         rationale="Heuristic annotation based on punctuation, dialogue markers, and nearby emotion words.",
     )
     passage.audio_tags = audio_tags_for_passage(passage)

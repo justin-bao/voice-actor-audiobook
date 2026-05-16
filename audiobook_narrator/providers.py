@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 MAX_RATE_LIMIT_RETRIES = 5
 MAX_BACKOFF_SECONDS = 60.0
 
+# ElevenLabs v3 inline pause tags in descending duration order
+_PAUSE_ENDINGS = ("[long pause]", "[pause]", "[short pause]")
+
 
 def langfuse_configured() -> bool:
     enabled = os.getenv("LANGFUSE_ENABLED", "true").lower() not in {"0", "false", "no", "off"}
@@ -491,6 +494,15 @@ class ElevenLabsTTSProvider:
             )
         return output_path
 
+    @staticmethod
+    def _pause_tag_for_ms(ms: int) -> str:
+        """Map pause_after_ms to the closest ElevenLabs v3 inline pause tag."""
+        if ms >= 900:
+            return "[long pause]"
+        if ms >= 400:
+            return "[pause]"
+        return "[short pause]"
+
     def _passage_input(
         self, passage: Passage, voice_by_speaker: dict[str, str]
     ) -> tuple[dict, str, list[str]]:
@@ -498,6 +510,11 @@ class ElevenLabsTTSProvider:
 
         If passage.tts_text is set it is sent to the TTS API; the original passage.text
         is preserved as the display text used for timing and manifest metadata.
+
+        A trailing pause tag derived from passage.pause_after_ms is appended unless
+        the text already ends with a pause tag embedded by the annotator. This
+        translates the passage-level pause duration into audible silence that
+        ElevenLabs v3 generates at the end of each passage.
         """
         voice_id = self.voice_id_for(passage.speaker, voice_by_speaker)
         display_text = passage.text.strip()
@@ -508,6 +525,9 @@ class ElevenLabsTTSProvider:
         else:
             audio_tags = audio_tags_for_passage(passage)
             tagged_text = " ".join(audio_tags + [tts_base]).strip()
+        # Append a trailing pause tag unless the text already ends with one.
+        if not any(tagged_text.lower().endswith(p) for p in _PAUSE_ENDINGS):
+            tagged_text = f"{tagged_text} {self._pause_tag_for_ms(passage.pause_after_ms)}"
         return {"text": tagged_text, "voice_id": voice_id}, display_text, audio_tags
 
     def _dialogue_chunks(
@@ -525,6 +545,16 @@ class ElevenLabsTTSProvider:
             would_exceed_chars = char_count + len(tagged_text) > self.MAX_DIALOGUE_CHARS
             would_exceed_voices = voice_id not in voices and len(voices) >= self.MAX_UNIQUE_VOICES
             if inputs and (would_exceed_chars or would_exceed_voices):
+                # At chunk boundaries, upgrade the last passage's trailing pause to
+                # [long pause] so ElevenLabs generates a natural gap between the two
+                # synthesized API calls.
+                last = inputs[-1]
+                for old_tag in _PAUSE_ENDINGS:
+                    if last["text"].lower().endswith(old_tag):
+                        last["text"] = last["text"][: -len(old_tag)].rstrip() + " [long pause]"
+                        break
+                else:
+                    last["text"] = f"{last['text']} [long pause]"
                 chunks.append({"inputs": inputs, "manifest": manifest})
                 inputs = []
                 manifest = []
