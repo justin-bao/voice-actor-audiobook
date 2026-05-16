@@ -1478,6 +1478,35 @@ async function reorderChapters(chapterIds) {
   setStatus("Chapter order saved");
 }
 
+function openDownloadModal() {
+  if (!state.project || !state.chapters.length) return;
+  $("download-chapter-list").innerHTML = state.chapters.map((chapter) => {
+    const hasAudio = chapter.has_audio;
+    return `
+      <label class="generate-chapter-row${hasAudio ? "" : " generate-chapter-disabled"}">
+        <input type="checkbox" class="download-chapter-check" value="${escapeAttr(chapter.chapter_id)}" ${hasAudio ? "checked" : "disabled"} />
+        <span class="generate-chapter-title">${escapeHtml(chapter.title || chapter.chapter_id)}</span>
+        ${hasAudio ? '<span class="generate-chapter-badge" title="Audio available">♪</span>' : ""}
+      </label>
+    `;
+  }).join("");
+  $("download-modal").showModal();
+}
+
+function startDownload() {
+  const chapterIds = Array.from(document.querySelectorAll(".download-chapter-check:checked"))
+    .map((cb) => cb.value);
+  if (!chapterIds.length) return;
+  $("download-modal").close();
+  const params = new URLSearchParams({ chapters: chapterIds.join(",") });
+  const a = document.createElement("a");
+  a.href = `/api/projects/${encodeURIComponent(state.project.project_id)}/download?${params}`;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
 function openGenerateModal() {
   if (!state.project || !state.chapters.length) return;
   $("generate-chapter-list").innerHTML = state.chapters.map((chapter) => `
@@ -1697,6 +1726,20 @@ function wireEvents() {
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
   $("import-file").addEventListener("click", () => $("file-input").click());
   $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
+  $("download-book-audio").addEventListener("click", () => {
+    if (!state.project) return;
+    openDownloadModal();
+  });
+  $("start-download").addEventListener("click", startDownload);
+  $("download-select-all").addEventListener("click", () => {
+    document.querySelectorAll(".download-chapter-check:not(:disabled)").forEach((cb) => { cb.checked = true; });
+  });
+  $("download-select-none").addEventListener("click", () => {
+    document.querySelectorAll(".download-chapter-check:not(:disabled)").forEach((cb) => { cb.checked = false; });
+  });
+  document.querySelectorAll(".close-download").forEach((btn) => {
+    btn.addEventListener("click", () => $("download-modal").close());
+  });
   $("file-input").addEventListener("change", (event) => importFiles(event.target.files));
   $("add-pronunciation").addEventListener("click", () => {
     $("pronunciation-list").insertAdjacentHTML("beforeend", pronunciationRow());

@@ -457,6 +457,15 @@ body.sidebar-resizing .sidebar-resize-handle {
   flex-shrink: 0;
 }
 
+.generate-chapter-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.generate-chapter-disabled input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
 .status {
   padding: 10px;
   border-radius: 6px;
