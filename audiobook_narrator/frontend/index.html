@@ -40,11 +40,13 @@
           <div class="toc-heading">
             <span>Contents</span>
             <small id="toc-count">0</small>
+            <button id="open-generate-modal" class="icon-button toc-gen-btn" title="Generate narration for multiple chapters">▶ Generate</button>
           </div>
           <ol id="toc-list" class="toc-list"></ol>
         </div>
 
         <div class="status" id="status">Ready</div>
+        <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize sidebar"></div>
       </aside>
 
       <main class="workspace inspector-collapsed">
@@ -184,6 +186,24 @@
           <button id="cancel-bulk-import" type="button">Cancel</button>
           <button id="import-source-only" type="button">Add Source Text Only</button>
           <button id="confirm-bulk-import" type="button">Analyze + Annotate</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="generate-modal" class="modal generate-modal">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>Generate Narration</h2>
+          <button type="button" class="close-generate" title="Close">×</button>
+        </div>
+        <div class="generate-select-row">
+          <button id="generate-select-all">All</button>
+          <button id="generate-select-none">None</button>
+        </div>
+        <div id="generate-chapter-list" class="generate-chapter-list"></div>
+        <div class="modal-actions">
+          <button type="button" class="close-generate">Cancel</button>
+          <button id="start-generate">▶ Generate selected</button>
         </div>
       </div>
     </dialog>

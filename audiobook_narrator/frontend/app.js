@@ -22,6 +22,7 @@ const state = {
   pendingBulkImportFiles: [],
   busyJobs: new Map(),
   pipelineCanceled: false,
+  generatingChapters: new Set(),
 };
 
 let previewAudio = null;
@@ -432,6 +433,31 @@ function renderProject(payload) {
   renderCast();
 }
 
+function chapterStatusIcon(chapter, busyJob = null) {
+  if (state.generatingChapters.has(chapter.chapter_id) || busyJob) {
+    return '<span class="toc-status" title="Processing…"><span class="toc-spin"></span></span>';
+  }
+  if (chapter.pipeline_state === "error") {
+    return `<span class="toc-status toc-badge-error" title="${escapeAttr(chapter.pipeline_message || "Analysis failed")}">!</span>`;
+  }
+  if (chapter.pipeline_state === "paused") {
+    return '<span class="toc-status toc-badge-warn" title="Paused">Ⅱ</span>';
+  }
+  if (chapter.pipeline_state === "canceled") {
+    return '<span class="toc-status toc-badge-warn" title="Canceled">—</span>';
+  }
+  if (chapter.has_audio) {
+    return '<span class="toc-status toc-badge-audio" title="Audio generated">♪</span>';
+  }
+  if (chapter.has_annotations) {
+    return '<span class="toc-status toc-badge-ok" title="Annotated">✓</span>';
+  }
+  if (chapter.has_memory) {
+    return '<span class="toc-status toc-badge-mem" title="Analyzed">A</span>';
+  }
+  return '<span class="toc-status toc-badge-none" aria-hidden="true"></span>';
+}
+
 function renderToc() {
   $("toc-count").textContent = String(state.chapters.length);
   $("toc-list").innerHTML = state.chapters
@@ -449,8 +475,8 @@ function renderToc() {
             ${tocState.html}
           </span>
         </button>
-        ${busyJob?.cancellable ? `<button class="toc-cancel" title="Cancel analysis from this chapter onward" data-chapter-id="${escapeAttr(chapter.chapter_id)}">×</button>` : ""}
-        <button class="toc-delete danger" title="Delete chapter">×</button>
+        ${busyJob?.cancellable ? `<button class="toc-cancel" title="Cancel analysis from this chapter onward" data-chapter-id="${escapeAttr(chapter.chapter_id)}">×</button>` : chapterStatusIcon(chapter, busyJob)}
+        <button class="toc-delete danger" title="Delete this chapter">🗑</button>
       </li>
     `;
     })
@@ -1457,6 +1483,68 @@ async function reorderChapters(chapterIds) {
   setStatus("Chapter order saved");
 }
 
+function openGenerateModal() {
+  if (!state.project || !state.chapters.length) return;
+  $("generate-chapter-list").innerHTML = state.chapters.map((chapter) => `
+    <label class="generate-chapter-row">
+      <input type="checkbox" class="generate-chapter-check" value="${escapeAttr(chapter.chapter_id)}" checked />
+      <span class="generate-chapter-title">${escapeHtml(chapter.title || chapter.chapter_id)}</span>
+      ${chapter.has_audio ? '<span class="generate-chapter-badge" title="Audio already exists">♪</span>' : ""}
+    </label>
+  `).join("");
+  $("generate-modal").showModal();
+}
+
+async function startGenerate() {
+  const chapterIds = Array.from(document.querySelectorAll(".generate-chapter-check:checked"))
+    .map((cb) => cb.value);
+  if (!chapterIds.length) return;
+  $("generate-modal").close();
+  chapterIds.forEach((id) => state.generatingChapters.add(id));
+  renderToc();
+  setStatus(`Generating ${chapterIds.length} chapter${chapterIds.length > 1 ? "s" : ""}…`);
+  const promises = chapterIds.map(async (chapterId) => {
+    try {
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+        method: "POST",
+        body: JSON.stringify({ step: "synthesize", chapter_id: chapterId, backend: "elevenlabs" }),
+      });
+      const chapter = state.chapters.find((c) => c.chapter_id === chapterId);
+      if (chapter) chapter.has_audio = true;
+    } catch (err) {
+      setStatus(`Generate failed for ${chapterId}: ${err.message}`);
+    } finally {
+      state.generatingChapters.delete(chapterId);
+      renderToc();
+    }
+  });
+  await Promise.allSettled(promises);
+  if (state.selectedChapterId && chapterIds.includes(state.selectedChapterId)) {
+    await loadProject(state.project.project_id, state.selectedChapterId);
+  }
+  setStatus(`Generation complete`);
+}
+
+function wireSidebarResize() {
+  const appShell = document.querySelector(".app-shell");
+  let resizing = false;
+  $("sidebar-resize-handle").addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    resizing = true;
+    document.body.classList.add("sidebar-resizing");
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (!resizing) return;
+    const width = Math.max(200, Math.min(560, e.clientX));
+    appShell.style.gridTemplateColumns = `${width}px minmax(0, 1fr)`;
+  });
+  document.addEventListener("mouseup", () => {
+    if (!resizing) return;
+    resizing = false;
+    document.body.classList.remove("sidebar-resizing");
+  });
+}
+
 function wireEvents() {
   $("open-book-modal").addEventListener("click", () => {
     $("project-title").value = "";
@@ -1590,6 +1678,17 @@ function wireEvents() {
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
   $("analyze-chapter").addEventListener("click", () => runChapterStep("analyze"));
   $("annotate-chapter").addEventListener("click", () => runChapterStep("annotate"));
+  $("open-generate-modal").addEventListener("click", openGenerateModal);
+  $("start-generate").addEventListener("click", startGenerate);
+  $("generate-select-all").addEventListener("click", () => {
+    document.querySelectorAll(".generate-chapter-check").forEach((cb) => { cb.checked = true; });
+  });
+  $("generate-select-none").addEventListener("click", () => {
+    document.querySelectorAll(".generate-chapter-check").forEach((cb) => { cb.checked = false; });
+  });
+  document.querySelectorAll(".close-generate").forEach((btn) => {
+    btn.addEventListener("click", () => $("generate-modal").close());
+  });
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
   $("import-file").addEventListener("click", () => $("file-input").click());
@@ -1714,7 +1813,7 @@ function clearChapterUi() {
 function resetDeleteButton() {
   state.pendingDeleteChapterId = null;
   document.querySelectorAll(".toc-delete").forEach((button) => {
-    button.textContent = "×";
+    button.textContent = "🗑";
     button.classList.remove("armed");
   });
 }
@@ -1753,6 +1852,7 @@ function safeId(value) {
 
 window.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
+  wireSidebarResize();
   try {
     await refreshProjects();
   } catch (error) {

@@ -599,8 +599,12 @@ class NarratorWebApp:
         for index, manifest_path in enumerate(sorted(paths.source.glob("*.manifest.json"))):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest.setdefault("order", index)
-            manifest.setdefault("analyzed", (paths.memory / "chapters" / f"{manifest['chapter_id']}.json").exists())
-            manifest.setdefault("annotated", (paths.annotations / f"{manifest['chapter_id']}.jsonl").exists())
+            chapter_id = manifest.get("chapter_id", "")
+            manifest["has_memory"] = (paths.memory / "chapters" / f"{chapter_id}.json").exists()
+            manifest["has_annotations"] = (paths.annotations / f"{chapter_id}.jsonl").exists()
+            manifest["has_audio"] = (paths.audio / f"{chapter_id}.mp3").exists()
+            manifest.setdefault("analyzed", manifest["has_memory"])
+            manifest.setdefault("annotated", manifest["has_annotations"])
             manifest.setdefault(
                 "pipeline_state",
                 "complete" if manifest["analyzed"] and manifest["annotated"] else "pending",

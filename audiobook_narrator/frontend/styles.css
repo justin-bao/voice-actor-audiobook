@@ -80,6 +80,7 @@ textarea:focus-visible {
 }
 
 .sidebar {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -91,6 +92,7 @@ textarea:focus-visible {
   color: #eef7f3;
   background: var(--side);
   border-right: 1px solid #0c1815;
+  overflow: hidden;
 }
 
 .brand {
@@ -201,10 +203,31 @@ textarea:focus-visible {
 
 .toc-heading {
   display: flex;
-  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
   color: #b8ccc4;
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.toc-heading span {
+  flex: 1;
+}
+
+.toc-gen-btn {
+  min-height: 0;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  border-color: #3c594f;
+  background: #203630;
+  color: #b8ccc4;
+}
+
+.toc-gen-btn:hover {
+  background: #2a4a42;
+  color: #eef7f3;
+  border-color: var(--accent-2);
 }
 
 .toc-list {
@@ -220,8 +243,8 @@ textarea:focus-visible {
 
 .toc-item {
   display: grid;
-  grid-template-columns: 26px minmax(0, 1fr) auto 30px;
-  gap: 8px;
+  grid-template-columns: 22px minmax(0, 1fr) 28px 28px;
+  gap: 6px;
   align-items: center;
   min-height: 40px;
   padding: 7px 8px;
@@ -268,29 +291,6 @@ textarea:focus-visible {
   text-align: left;
 }
 
-.toc-state {
-  margin-left: 6px;
-  color: #d2b36c;
-  font-size: 11px;
-}
-
-.toc-item.is-complete .toc-state {
-  color: #8fd1b2;
-}
-
-.toc-item.is-running .toc-state {
-  color: #fff0b5;
-}
-
-.toc-item.is-paused .toc-state,
-.toc-item.is-canceled .toc-state {
-  color: #f2c56d;
-}
-
-.toc-item.is-error .toc-state {
-  color: #ff9a9a;
-}
-
 .toc-cancel {
   width: 28px;
   min-height: 28px;
@@ -300,21 +300,130 @@ textarea:focus-visible {
   color: #ffd6d1;
 }
 
-.mini-spinner {
+.toc-status {
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.toc-badge-audio { color: #b98324; }
+.toc-badge-ok    { color: #50c090; }
+.toc-badge-mem   { color: #9db2aa; font-weight: 700; }
+.toc-badge-error { color: #ff9a9a; }
+.toc-badge-warn  { color: #f2c56d; }
+
+.toc-spin {
   display: inline-block;
-  width: 10px;
-  height: 10px;
-  border: 2px solid currentColor;
-  border-top-color: transparent;
-  border-radius: 999px;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent-2);
+  border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 
 .toc-delete {
-  width: 30px;
-  min-height: 30px;
+  width: 28px;
+  min-height: 28px;
   padding: 0;
   background: transparent;
+  font-size: 15px;
+  line-height: 1;
+  border-color: transparent;
+}
+
+.toc-delete:hover {
+  border-color: var(--accent);
+  background: rgba(166, 45, 54, 0.12);
+}
+
+.toc-delete.armed {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+.sidebar-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 10;
+  background: transparent;
+  transition: background 0.2s;
+}
+
+.sidebar-resize-handle:hover {
+  background: var(--accent-2);
+  opacity: 0.5;
+}
+
+body.sidebar-resizing {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+body.sidebar-resizing .sidebar-resize-handle {
+  background: var(--accent-2);
+  opacity: 0.8;
+}
+
+.generate-modal {
+  width: min(480px, calc(100vw - 32px));
+}
+
+.generate-select-row {
+  display: flex;
+  gap: 8px;
+}
+
+.generate-chapter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.generate-chapter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.generate-chapter-row:hover {
+  background: #f2f7f4;
+}
+
+.generate-chapter-row input[type="checkbox"] {
+  min-height: 0;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.generate-chapter-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.generate-chapter-badge {
+  font-size: 13px;
+  color: var(--gold);
+  flex-shrink: 0;
 }
 
 .status {
