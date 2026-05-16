@@ -7,15 +7,7 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div id="busy-overlay" class="busy-overlay" aria-live="polite" hidden>
-      <div class="busy-box">
-        <div class="spinner" aria-hidden="true"></div>
-        <div>
-          <strong id="busy-title">Working</strong>
-          <p id="busy-detail">Waiting for the model...</p>
-        </div>
-      </div>
-    </div>
+    <div id="busy-overlay" class="busy-overlay" aria-live="polite" hidden></div>
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand">
@@ -36,7 +28,7 @@
 
         <div class="side-actions">
           <button id="sidebar-import-file" title="Import one or more chapters">Import</button>
-          <button id="run-pipeline" title="Analyze story memory, annotate passages, and assign voices">Analyze + Annotate + Cast</button>
+          <button id="run-pipeline" title="Analyze and annotate every chapter that still needs work">Analyze + Annotate</button>
           <label class="mode-label" for="narration-mode">Narration mode</label>
           <select id="narration-mode" title="Single narrator performs all voices; or assign a distinct voice per character">
             <option value="multi_voice">Multi-voice cast</option>
@@ -75,6 +67,8 @@
             <div class="toolbar-actions">
               <input id="file-input" type="file" accept=".txt,.md,.docx,.pdf,.epub" multiple hidden />
               <button id="import-file" title="Import one or more chapters">⇧ Import</button>
+              <button id="analyze-chapter" title="Analyze this chapter and update story memory">Analyze</button>
+              <button id="annotate-chapter" title="Annotate this chapter">Annotate</button>
               <button id="reset-annotations" title="Clear all annotations for this chapter">Clear</button>
               <button id="synthesize" title="Generate narration">▶ Generate</button>
               <button id="save-chapter" class="toolbar-save" title="Save chapter page">💾 Save</button>
@@ -179,6 +173,21 @@
       </form>
     </dialog>
 
-    <script src="/app.js?v=20260514-chapter-page"></script>
+    <dialog id="bulk-import-modal" class="modal bulk-import-modal">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>Verify Chapter Order</h2>
+          <button id="close-bulk-import-modal" type="button" class="icon-button" title="Close">×</button>
+        </div>
+        <ol id="bulk-import-list" class="bulk-import-list"></ol>
+        <div class="modal-actions">
+          <button id="cancel-bulk-import" type="button">Cancel</button>
+          <button id="import-source-only" type="button">Add Source Text Only</button>
+          <button id="confirm-bulk-import" type="button">Analyze + Annotate</button>
+        </div>
+      </div>
+    </dialog>
+
+    <script src="/app.js?v=20260515-sequential-pipeline"></script>
   </body>
 </html>

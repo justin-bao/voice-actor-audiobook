@@ -92,6 +92,7 @@ def update_story_memory(
     project_id: str,
     provider: LLMProvider,
     narration_mode: str = "multi_voice",
+    chapter_ids: set[str] | None = None,
 ) -> StoryMemory:
     paths = store.paths(project_id)
     memory = store.load_memory(project_id)
@@ -100,6 +101,9 @@ def update_story_memory(
     prev_chapter_memory: ChapterMemory | None = None
     for source_path in source_chapter_paths(paths.source):
         chapter_id = source_path.stem
+        if chapter_ids is not None and chapter_id not in chapter_ids:
+            prev_chapter_memory = store.load_chapter_memory(project_id, chapter_id) or prev_chapter_memory
+            continue
         text = source_path.read_text(encoding="utf-8")
         analyzed_chapters.append(chapter_id)
         if provider_is_heuristic and chapter_id in memory.chapter_summaries:
@@ -136,13 +140,6 @@ def update_story_memory(
                 )
         if analysis.get("current_state"):
             memory.current_state = chapter_memory.current_state
-        passages = annotate_chapter(
-            chapter_id, text, memory, provider,
-            chapter_memory=chapter_memory,
-            prev_chapter_memory=prev_chapter_memory,
-            narration_mode=narration_mode,
-        )
-        store.write_jsonl(paths.annotations / f"{chapter_id}.jsonl", passages)
         prev_chapter_memory = chapter_memory
     if not memory.plot_summary or memory.plot_summary == GENERIC_PLOT_SUMMARY or not provider_is_heuristic:
         memory.plot_summary = build_plot_summary(memory)

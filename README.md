@@ -33,7 +33,7 @@ audiobook-narrator cast --project-id three-body
 audiobook-narrator synthesize --project-id three-body --chapter-id ch01 --backend elevenlabs
 ```
 
-`analyze` now runs both analysis and annotation in one step. The standalone `annotate` command is still available for re-annotating without re-analyzing.
+`analyze` runs analysis and annotation sequentially, one chapter at a time. The standalone `annotate` command also walks chapters sequentially and refreshes analysis context before re-annotating so earlier chapters are never directed with future-book knowledge.
 
 Or run the local studio UI:
 

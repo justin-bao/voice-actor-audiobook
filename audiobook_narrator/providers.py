@@ -6,12 +6,15 @@ import os
 import ssl
 import subprocess
 import sys
+import time
+import random
 import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager, nullcontext
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Iterator, Protocol
+from typing import Callable, Iterator, Protocol
 
 from dotenv import load_dotenv
 
@@ -21,6 +24,8 @@ from audiobook_narrator.models import JsonDict, Passage
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+MAX_RATE_LIMIT_RETRIES = 5
+MAX_BACKOFF_SECONDS = 60.0
 
 
 def langfuse_configured() -> bool:
@@ -185,25 +190,29 @@ class OpenAILLMProvider:
             len(user),
         )
         try:
-            with langfuse_observation(
-                "openai-complete-json",
-                as_type="generation",
-                input={"system_chars": len(system), "user_chars": len(user)},
-                metadata={"provider": "openai", "response_format": "json_object"},
-                model=self.model,
-            ) as generation:
-                response = self.client.responses.create(
+            def request():
+                with langfuse_observation(
+                    "openai-complete-json",
+                    as_type="generation",
+                    input={"system_chars": len(system), "user_chars": len(user)},
+                    metadata={"provider": "openai", "response_format": "json_object"},
                     model=self.model,
-                    input=[
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
-                    text={"format": {"type": "json_object"}},
-                )
-                update_langfuse_observation(
-                    generation,
-                    output={"response_id": getattr(response, "id", None), "output_chars": len(response.output_text or "")},
-                )
+                ) as generation:
+                    response = self.client.responses.create(
+                        model=self.model,
+                        input=[
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": user},
+                        ],
+                        text={"format": {"type": "json_object"}},
+                    )
+                    update_langfuse_observation(
+                        generation,
+                        output={"response_id": getattr(response, "id", None), "output_chars": len(response.output_text or "")},
+                    )
+                    return response
+
+            response = retry_rate_limited("openai", "complete_json", request)
         except Exception:
             logger.exception("LLM provider=openai request_failed model=%s", self.model)
             raise
@@ -238,12 +247,24 @@ def provider_summary(provider: LLMProvider) -> dict[str, str | None]:
 
 
 class TTSProvider(Protocol):
-    def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
+    def synthesize(
+        self,
+        passages: list[Passage],
+        output_path: Path,
+        voice_by_speaker: dict[str, str],
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Path:
         ...
 
 
 class ScriptOnlyTTSProvider:
-    def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
+    def synthesize(
+        self,
+        passages: list[Passage],
+        output_path: Path,
+        voice_by_speaker: dict[str, str],
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         rows = [
             f"[{p.speaker} | {voice_by_speaker.get(p.speaker, 'default')} | "
@@ -255,7 +276,13 @@ class ScriptOnlyTTSProvider:
 
 
 class MacOSSayTTSProvider:
-    def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
+    def synthesize(
+        self,
+        passages: list[Passage],
+        output_path: Path,
+        voice_by_speaker: dict[str, str],
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Path:
         parts_dir = output_path.parent / f"{output_path.stem}_parts"
         parts_dir.mkdir(parents=True, exist_ok=True)
         manifest = []
@@ -292,7 +319,13 @@ class OpenAITTSProvider:
         self.model = model or os.getenv("NARRATION_TTS_MODEL", "gpt-4o-mini-tts")
         logger.info("TTS provider=openai selected model=%s langfuse_wrapped=%s", self.model, self.langfuse_wrapped)
 
-    def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
+    def synthesize(
+        self,
+        passages: list[Passage],
+        output_path: Path,
+        voice_by_speaker: dict[str, str],
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Path:
         parts_dir = output_path.parent / f"{output_path.stem}_parts"
         parts_dir.mkdir(parents=True, exist_ok=True)
         manifest = []
@@ -318,12 +351,15 @@ class OpenAITTSProvider:
                 metadata={"provider": "openai", "voice": voice, "speaker": passage.speaker},
                 model=self.model,
             ) as generation:
-                with self.client.audio.speech.with_streaming_response.create(
-                    model=self.model,
-                    voice=voice,
-                    input=prompt,
-                ) as response:
-                    response.stream_to_file(part_path)
+                def request():
+                    with self.client.audio.speech.with_streaming_response.create(
+                        model=self.model,
+                        voice=voice,
+                        input=prompt,
+                    ) as response:
+                        response.stream_to_file(part_path)
+
+                retry_rate_limited("openai", "tts", request)
                 update_langfuse_observation(generation, output={"path": str(part_path)})
             logger.info(
                 "TTS provider=openai request_complete model=%s voice=%s passage_id=%s output=%s",
@@ -364,14 +400,63 @@ class ElevenLabsTTSProvider:
         self.default_voice_id = os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", "")
         self.env_voice_map = self._load_env_voice_map()
 
-    def synthesize(self, passages: list[Passage], output_path: Path, voice_by_speaker: dict[str, str]) -> Path:
+    def synthesize(
+        self,
+        passages: list[Passage],
+        output_path: Path,
+        voice_by_speaker: dict[str, str],
+        progress_callback: Callable[[dict], None] | None = None,
+    ) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         chunks = self._dialogue_chunks(passages, voice_by_speaker)
+        logger.info(
+            "TTS provider=elevenlabs synthesize_start model=%s chunks=%s passages=%s output=%s",
+            self.model_id,
+            len(chunks),
+            len(passages),
+            output_path,
+        )
+        if progress_callback:
+            progress_callback({"phase": "starting", "total_chunks": len(chunks), "completed_chunks": 0})
         manifest = []
         chunk_paths: list[Path] = []
         for chunk_index, chunk in enumerate(chunks):
             part_path = output_path.parent / f"{output_path.stem}_{chunk_index:03d}.mp3"
+            logger.info(
+                "TTS provider=elevenlabs chunk_start chunk=%s/%s inputs=%s chars=%s voices=%s output=%s",
+                chunk_index + 1,
+                len(chunks),
+                len(chunk["inputs"]),
+                sum(len(item.get("text", "")) for item in chunk["inputs"]),
+                len({item.get("voice_id") for item in chunk["inputs"]}),
+                part_path,
+            )
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "generating",
+                        "total_chunks": len(chunks),
+                        "completed_chunks": chunk_index,
+                        "current_chunk": chunk_index + 1,
+                    }
+                )
             self._stream_dialogue(chunk["inputs"], part_path)
+            logger.info(
+                "TTS provider=elevenlabs chunk_complete chunk=%s/%s bytes=%s output=%s",
+                chunk_index + 1,
+                len(chunks),
+                part_path.stat().st_size if part_path.exists() else 0,
+                part_path,
+            )
+            if progress_callback:
+                progress_callback(
+                    {
+                        "phase": "generating",
+                        "total_chunks": len(chunks),
+                        "completed_chunks": chunk_index + 1,
+                        "current_chunk": chunk_index + 1,
+                    }
+                )
             chunk_paths.append(part_path)
             manifest.append(
                 {
@@ -389,6 +474,21 @@ class ElevenLabsTTSProvider:
                 combined.write(part_path.read_bytes())
         manifest_path = output_path.with_suffix(".parts.json")
         manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        logger.info(
+            "TTS provider=elevenlabs synthesize_complete model=%s chunks=%s output=%s manifest=%s",
+            self.model_id,
+            len(chunks),
+            output_path,
+            manifest_path,
+        )
+        if progress_callback:
+            progress_callback(
+                {
+                    "phase": "complete",
+                    "total_chunks": len(chunks),
+                    "completed_chunks": len(chunks),
+                }
+            )
         return output_path
 
     def _passage_input(
@@ -446,7 +546,19 @@ class ElevenLabsTTSProvider:
     ) -> None:
         """Re-synthesize a single chunk from its passage list and overwrite output_path."""
         inputs = [self._passage_input(p, voice_by_speaker)[0] for p in passages]
+        logger.info(
+            "TTS provider=elevenlabs regenerate_start inputs=%s chars=%s voices=%s output=%s",
+            len(inputs),
+            sum(len(item.get("text", "")) for item in inputs),
+            len({item.get("voice_id") for item in inputs}),
+            output_path,
+        )
         self._stream_dialogue(inputs, output_path)
+        logger.info(
+            "TTS provider=elevenlabs regenerate_complete bytes=%s output=%s",
+            output_path.stat().st_size if output_path.exists() else 0,
+            output_path,
+        )
 
     def voice_id_for(self, speaker: str, voice_by_speaker: dict[str, str]) -> str:
         voice_id = self.env_voice_map.get(speaker) or voice_by_speaker.get(speaker)
@@ -476,12 +588,49 @@ class ElevenLabsTTSProvider:
                 "Accept": "audio/mpeg",
             },
         )
+        started = time.monotonic()
+        logger.info(
+            "TTS provider=elevenlabs request_start model=%s inputs=%s chars=%s voices=%s output=%s",
+            self.model_id,
+            len(inputs),
+            sum(len(item.get("text", "")) for item in inputs),
+            len({item.get("voice_id") for item in inputs}),
+            output_path,
+        )
         try:
-            with urllib.request.urlopen(request, timeout=120, context=tls_context()) as response:
-                output_path.write_bytes(response.read())
+            def request_audio():
+                with urllib.request.urlopen(request, timeout=120, context=tls_context()) as response:
+                    audio = response.read()
+                    output_path.write_bytes(audio)
+                    logger.info(
+                        "TTS provider=elevenlabs request_complete model=%s status=%s elapsed_ms=%s bytes=%s output=%s",
+                        self.model_id,
+                        getattr(response, "status", None),
+                        round((time.monotonic() - started) * 1000),
+                        len(audio),
+                        output_path,
+                    )
+
+            retry_rate_limited("elevenlabs", "stream_dialogue", request_audio)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
+            logger.error(
+                "TTS provider=elevenlabs request_failed model=%s status=%s elapsed_ms=%s output=%s detail=%s",
+                self.model_id,
+                exc.code,
+                round((time.monotonic() - started) * 1000),
+                output_path,
+                detail[:500],
+            )
             raise RuntimeError(f"ElevenLabs request failed ({exc.code}): {detail}") from exc
+        except Exception:
+            logger.exception(
+                "TTS provider=elevenlabs request_failed model=%s elapsed_ms=%s output=%s",
+                self.model_id,
+                round((time.monotonic() - started) * 1000),
+                output_path,
+            )
+            raise
 
     def list_voices(self, page_size: int = 100) -> list[dict]:
         voices: list[dict] = []
@@ -500,8 +649,11 @@ class ElevenLabsTTSProvider:
                 headers={"xi-api-key": self.api_key, "Accept": "application/json"},
             )
             try:
-                with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
-                    payload = json.loads(response.read().decode("utf-8"))
+                def request_voices():
+                    with urllib.request.urlopen(request, timeout=60, context=tls_context()) as response:
+                        return json.loads(response.read().decode("utf-8"))
+
+                payload = retry_rate_limited("elevenlabs", "list_voices", request_voices)
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"ElevenLabs voice list failed ({exc.code}): {detail}") from exc
@@ -543,6 +695,69 @@ def get_tts_provider(name: str | None = None) -> TTSProvider:
     if backend == "macos_say":
         return MacOSSayTTSProvider()
     return ScriptOnlyTTSProvider()
+
+
+def retry_rate_limited(provider: str, operation: str, call: Callable[[], object]) -> object:
+    for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            return call()
+        except Exception as exc:
+            if not is_rate_limited(exc) or attempt >= MAX_RATE_LIMIT_RETRIES:
+                if is_rate_limited(exc):
+                    logger.error(
+                        "Provider retry_exhausted provider=%s operation=%s attempts=%s error=%s",
+                        provider,
+                        operation,
+                        attempt + 1,
+                        exc,
+                    )
+                raise
+            retry_after = retry_after_seconds(exc)
+            exponential = min(MAX_BACKOFF_SECONDS, 2 ** attempt)
+            delay = retry_after if retry_after is not None else min(
+                MAX_BACKOFF_SECONDS,
+                exponential + random.uniform(0, min(1.0, exponential / 2)),
+            )
+            logger.warning(
+                "Provider rate_limited provider=%s operation=%s attempt=%s retry_in=%.2fs error=%s",
+                provider,
+                operation,
+                attempt + 1,
+                delay,
+                exc,
+            )
+            time.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+def is_rate_limited(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code == 429
+    status_code = getattr(exc, "status_code", None)
+    if status_code == 429:
+        return True
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) == 429
+
+
+def retry_after_seconds(exc: Exception) -> float | None:
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        response = getattr(exc, "response", None)
+        headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    raw = headers.get("Retry-After") or headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        try:
+            dt = parsedate_to_datetime(str(raw))
+            return max(0.0, dt.timestamp() - time.time())
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
 
 
 def tls_context() -> ssl.SSLContext:

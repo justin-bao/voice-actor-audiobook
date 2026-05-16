@@ -46,6 +46,8 @@ class ChapterManifest(BaseModel):
     title: str
     source_path: str
     char_count: int
+    analyzed: bool = False
+    annotated: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

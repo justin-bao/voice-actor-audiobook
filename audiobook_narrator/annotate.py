@@ -16,6 +16,10 @@ ANNOTATE_SYSTEM_PROMPT = """You are an audiobook director for Mandarin Chinese f
 Use ElevenLabs v3 audio tags as the primary performance direction. Only use tags from this allowlist:
 __ALLOWED_AUDIO_TAGS__
 
+ElevenLabs v3 does NOT support SSML controls such as <break>, <prosody>, rate, pitch, or volume.
+Do not write or imply SSML. Encode performance direction directly in the text with v3-style inline tags.
+For pauses, use inline [short pause], [pause], or [long pause] tags at the moment the pause should occur.
+
 You will receive three memory inputs:
 - Book memory: cumulative facts — character biographies, stable personalities, established relationships, overall plot context.
 - Previous chapter state: the emotional and narrative handoff — where characters were left and the atmosphere at the end of the prior chapter.
@@ -27,6 +31,7 @@ Embed audio tags INLINE in the text at the exact position where the performance 
   "她先是沉默，然后[whispers] 低声说：'我知道了。'"
   "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
   "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
+  "她没有回答。[long pause] 屋里只剩下钟摆声。"
 
 PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the stored Hanyu Pinyin guide in parentheses at its FIRST occurrence in each passage. This gives the TTS engine a Mandarin-native phonetic anchor at the exact position. Format: 汪淼(Wāng Miǎo). Do not invent English respellings, and do not add pinyin for common everyday words; only use terms explicitly listed in pronunciation_notes.
 
@@ -37,7 +42,7 @@ Return strict JSON with a "passages" array. Each passage must preserve the numbe
   "text": "original text with [tag] markers and pronunciation guides embedded",
   "pace": "slow|medium|quick",
   "intensity": 1-5,
-  "pause_after_ms": integer,
+  "pause_after_ms": integer metadata approximating the trailing pause represented by inline v3 pause tags",
   "rationale": "specific performance note tied to this passage"
 }
 Only insert tags from the allowlist and pinyin guides. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
@@ -46,13 +51,17 @@ ANNOTATE_SYSTEM_PROMPT_SINGLE_NARRATOR = """You are an audiobook director for Ma
 Use ElevenLabs v3 audio tags as the primary performance direction. Only use tags from this allowlist:
 __ALLOWED_AUDIO_TAGS__
 
+ElevenLabs v3 does NOT support SSML controls such as <break>, <prosody>, rate, pitch, or volume.
+Do not write or imply SSML. Encode performance direction directly in the text with v3-style inline tags.
+For pauses, use inline [short pause], [pause], or [long pause] tags at the moment the pause should occur.
+
 You will receive three memory inputs:
 - Book memory: cumulative facts — character biographies, stable personalities, established relationships, overall plot context.
 - Previous chapter state: the emotional and narrative handoff — where characters were left and the atmosphere at the end of the prior chapter.
 - This chapter's episodic memory: atmosphere, emotional arcs, vocal quality per character, and key dramatic beats specific to this chapter.
 
 The narrator differentiates characters through subtle shifts in delivery, pace, register, and audio tags — NOT by switching voices. For dialogue:
-- Commanding/authoritative characters: slightly lower register, measured pace, [serious] or [authoritative] tone
+- Commanding/authoritative characters: slightly lower register, measured pace, [serious] tone
 - Young or curious characters: lighter, quicker delivery, [curious] or [excited]
 - Emotional moments: lean into [crying], [whispers], [tense], [fearful] etc.
 - Narrator prose: clear, even, neutral delivery
@@ -61,6 +70,7 @@ Embed audio tags INLINE in the text at the exact position where the performance 
   "她先是沉默，然后[whispers] 低声说：'我知道了。'"
   "[tense] 她盯着门口，[fearful] 听到脚步声越来越近。"
   "[angry] '你凭什么！'他吼道，[sad] 但眼眶已经红了。"
+  "她没有回答。[long pause] 屋里只剩下钟摆声。"
 
 PRONUNCIATION: For any proper noun, name, or term that appears in pronunciation_notes, embed the pinyin guide in parentheses at its FIRST occurrence in each passage. Format: 汪淼(Wāng Miǎo). Do not add pinyin for common everyday words; only for terms explicitly listed in pronunciation_notes.
 
@@ -71,7 +81,7 @@ Return strict JSON with a "passages" array. Each passage must preserve the numbe
   "text": "original text with [tag] markers and pronunciation guides embedded",
   "pace": "slow|medium|quick",
   "intensity": 1-5,
-  "pause_after_ms": integer,
+  "pause_after_ms": integer metadata approximating the trailing pause represented by inline v3 pause tags",
   "rationale": "specific delivery note — which character register shift or emotional beat to convey"
 }
 Only insert tags from the allowlist and pinyin guides. Do not otherwise alter the text. Use the exact chunk_index values supplied."""
@@ -104,6 +114,7 @@ def annotate_project(
     project_id: str,
     provider: LLMProvider,
     narration_mode: str = "multi_voice",
+    chapter_ids: set[str] | None = None,
 ) -> dict[str, list[Passage]]:
     paths = store.paths(project_id)
     memory = store.load_memory(project_id)
@@ -111,6 +122,9 @@ def annotate_project(
     prev_chapter_memory: ChapterMemory | None = None
     for source_path in list_source_chapter_paths(paths.source):
         chapter_id = source_path.stem
+        if chapter_ids is not None and chapter_id not in chapter_ids:
+            prev_chapter_memory = store.load_chapter_memory(project_id, chapter_id) or prev_chapter_memory
+            continue
         text = source_path.read_text(encoding="utf-8")
         chapter_memory = store.load_chapter_memory(project_id, chapter_id)
         passages = annotate_chapter(

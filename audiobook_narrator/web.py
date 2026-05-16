@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import threading
 import unicodedata
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -56,6 +57,9 @@ def natural_sort_key(value: str) -> list[object]:
 class NarratorWebApp:
     def __init__(self, projects_dir: Path) -> None:
         self.store = ProjectStore(projects_dir)
+        self._synthesis_progress: dict[tuple[str, str], dict] = {}
+        self._progress_lock = threading.Lock()
+        self._canceled_chapters: set[tuple[str, str]] = set()
 
     def list_projects(self) -> dict:
         projects = []
@@ -150,8 +154,10 @@ class NarratorWebApp:
         chapter_id = self.safe_chapter_id(body["chapter_id"].strip())
         title = body.get("title", chapter_id).strip() or chapter_id
         source_path = paths.source / f"{chapter_id}.txt"
+        previous_text = source_path.read_text(encoding="utf-8") if source_path.exists() else None
+        next_text = body.get("text", "")
         source_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.write_text(body.get("text", ""), encoding="utf-8")
+        source_path.write_text(next_text, encoding="utf-8")
         manifest_path = paths.source / f"{chapter_id}.manifest.json"
         existing_manifest = (
             json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -160,9 +166,14 @@ class NarratorWebApp:
             "chapter_id": chapter_id,
             "title": title,
             "source_path": str(source_path),
-            "char_count": len(body.get("text", "")),
+            "char_count": len(next_text),
             "order": existing_manifest.get("order", self.next_chapter_order(project_id)),
+            "analyzed": existing_manifest.get("analyzed", False),
+            "annotated": existing_manifest.get("annotated", False),
         }
+        if previous_text != next_text:
+            manifest["analyzed"] = False
+            manifest["annotated"] = False
         self.store.write_json(manifest_path, manifest)
         return {"ok": True, "manifest": manifest}
 
@@ -186,10 +197,7 @@ class NarratorWebApp:
         return {"ok": True, "manifest": manifest_payload, "text": text}
 
     def bulk_import(self, project_id: str, body: dict) -> dict:
-        files = sorted(
-            body.get("files", []),
-            key=lambda row: natural_sort_key(str(row.get("filename", ""))),
-        )
+        files = body.get("files", [])
         if not files:
             raise ValueError("No files were provided for bulk import.")
         manifests = []
@@ -211,6 +219,14 @@ class NarratorWebApp:
                 metadata={"step": "bulk-import-analyze", "llm": provider_summary(provider)},
             ) as observation:
                 memory = update_story_memory(self.store, project_id, provider)
+                for manifest in manifests:
+                    self.update_chapter_status(
+                        project_id,
+                        manifest["chapter_id"],
+                        analyzed=True,
+                        pipeline_state="analyzed",
+                        pipeline_message="Analysis complete.",
+                    )
                 update_langfuse_observation(
                     observation,
                     output={
@@ -287,14 +303,26 @@ class NarratorWebApp:
         chapter_id = self.safe_chapter_id(chapter_id)
         paths = self.store.paths(project_id)
         removed = []
-        for path in [
+        candidates = [
             paths.annotations / f"{chapter_id}.jsonl",
             paths.source / f"{chapter_id}.annotated.txt",
             paths.scripts / f"{chapter_id}.ssml.xml",
-        ]:
+            paths.audio / f"{chapter_id}.txt",
+            paths.audio / f"{chapter_id}.mp3",
+            paths.audio / f"{chapter_id}.aiff",
+            paths.audio / f"{chapter_id}.parts.json",
+        ]
+        candidates.extend(paths.audio.glob(f"{chapter_id}_*.mp3"))
+        candidates.extend(paths.audio.glob(f"{chapter_id}_*.aiff"))
+        candidates.extend(paths.audio.glob(f"{chapter_id}_parts*"))
+        for path in candidates:
             if path.exists():
-                path.unlink()
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
                 removed.append(str(path))
+        self.update_chapter_status(project_id, chapter_id, annotated=False)
         return {"ok": True, "removed": removed}
 
     def delete_chapter(self, project_id: str, chapter_id: str) -> dict:
@@ -337,45 +365,123 @@ class NarratorWebApp:
         config = self.store.load_config(project_id)
         narration_mode = config.narration_mode
         if step == "analyze":
+            if not chapter_id:
+                raise ValueError("chapter_id is required for analyze.")
+            safe_chapter_id = self.safe_chapter_id(chapter_id)
+            self.require_previous_chapter_analysis(project_id, safe_chapter_id)
+            self.update_chapter_status(
+                project_id,
+                safe_chapter_id,
+                pipeline_state="analyzing",
+                pipeline_message="Analyzing chapter context.",
+            )
             provider = get_llm_provider(not body.get("no_openai"))
             logger.info("Web step=analyze project=%s llm=%s mode=%s", project_id, provider_summary(provider), narration_mode)
-            with langfuse_observation(
-                "audiobook-analyze",
-                input={"project_id": project_id},
-                metadata={"step": "analyze", "llm": provider_summary(provider), "narration_mode": narration_mode},
-            ) as observation:
-                memory = update_story_memory(self.store, project_id, provider, narration_mode=narration_mode)
-                update_langfuse_observation(
-                    observation,
-                    output={
-                        "chapters": len(memory.chapter_summaries),
-                        "characters": len(memory.characters),
-                    },
+            try:
+                with langfuse_observation(
+                    "audiobook-analyze",
+                    input={"project_id": project_id},
+                    metadata={"step": "analyze", "llm": provider_summary(provider), "narration_mode": narration_mode},
+                ) as observation:
+                    memory = update_story_memory(
+                        self.store,
+                        project_id,
+                        provider,
+                        narration_mode=narration_mode,
+                        chapter_ids={safe_chapter_id},
+                    )
+                    cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider, narration_mode=narration_mode)
+                    self.raise_if_chapter_canceled(project_id, safe_chapter_id)
+                    self.update_chapter_status(
+                        project_id,
+                        safe_chapter_id,
+                        analyzed=True,
+                        pipeline_state="analyzed",
+                        pipeline_message="Analysis complete.",
+                    )
+                    update_langfuse_observation(
+                        observation,
+                        output={
+                            "chapters": len(memory.chapter_summaries),
+                            "characters": len(memory.characters),
+                        },
+                    )
+                    score_langfuse_current_trace(evaluate_analysis(memory))
+            except Exception as exc:
+                if (project_id, safe_chapter_id) in self._canceled_chapters:
+                    raise
+                self.update_chapter_status(
+                    project_id,
+                    safe_chapter_id,
+                    pipeline_state="error",
+                    pipeline_message=str(exc),
                 )
-                score_langfuse_current_trace(evaluate_analysis(memory))
+                self.mark_chapters_paused_after(
+                    project_id,
+                    safe_chapter_id,
+                    f"Paused because {safe_chapter_id} failed: {exc}",
+                )
+                raise
             flush_langfuse()
-            return {"ok": True, "memory": memory.model_dump(mode="json"), "llm": provider_summary(provider)}
+            return {"ok": True, "memory": memory.model_dump(mode="json"), "cast": cast.model_dump(mode="json"), "llm": provider_summary(provider)}
         if step == "annotate":
+            if not chapter_id:
+                raise ValueError("chapter_id is required for annotate.")
+            safe_chapter_id = self.safe_chapter_id(chapter_id)
+            self.update_chapter_status(
+                project_id,
+                safe_chapter_id,
+                pipeline_state="annotating",
+                pipeline_message="Annotating chapter.",
+            )
             provider = get_llm_provider(not body.get("no_openai"))
             logger.info("Web step=annotate project=%s llm=%s mode=%s", project_id, provider_summary(provider), narration_mode)
-            with langfuse_observation(
-                "audiobook-annotate",
-                input={"project_id": project_id},
-                metadata={"step": "annotate", "llm": provider_summary(provider), "narration_mode": narration_mode},
-            ) as observation:
-                annotated = annotate_project(self.store, project_id, provider, narration_mode=narration_mode)
-                update_langfuse_observation(
-                    observation,
-                    output={"chapters": {key: len(value) for key, value in annotated.items()}},
+            try:
+                with langfuse_observation(
+                    "audiobook-annotate",
+                    input={"project_id": project_id},
+                    metadata={"step": "annotate", "llm": provider_summary(provider), "narration_mode": narration_mode},
+                ) as observation:
+                    annotated = annotate_project(
+                        self.store,
+                        project_id,
+                        provider,
+                        narration_mode=narration_mode,
+                        chapter_ids={safe_chapter_id},
+                    )
+                    update_langfuse_observation(
+                        observation,
+                        output={"chapters": {key: len(value) for key, value in annotated.items()}},
+                    )
+                    passages = [passage for rows in annotated.values() for passage in rows]
+                    score_langfuse_current_trace(evaluate_annotations(passages))
+                    self.raise_if_chapter_canceled(project_id, safe_chapter_id)
+                    self.update_chapter_status(
+                        project_id,
+                        safe_chapter_id,
+                        annotated=True,
+                        pipeline_state="complete",
+                        pipeline_message="Analysis and annotation complete.",
+                    )
+            except Exception as exc:
+                if (project_id, safe_chapter_id) in self._canceled_chapters:
+                    raise
+                self.update_chapter_status(
+                    project_id,
+                    safe_chapter_id,
+                    pipeline_state="error",
+                    pipeline_message=str(exc),
                 )
-                passages = [passage for rows in annotated.values() for passage in rows]
-                score_langfuse_current_trace(evaluate_annotations(passages))
-                cast = build_cast(self.store, project_id, self.safe_elevenlabs_voices(), provider=provider, narration_mode=narration_mode)
+                self.mark_chapters_paused_after(
+                    project_id,
+                    safe_chapter_id,
+                    f"Paused because {safe_chapter_id} failed: {exc}",
+                )
+                raise
             flush_langfuse()
             return {
                 "ok": True,
                 "chapters": {key: len(value) for key, value in annotated.items()},
-                "cast": cast.model_dump(mode="json"),
                 "llm": provider_summary(provider),
             }
         if step == "cast":
@@ -407,8 +513,18 @@ class NarratorWebApp:
                 input={"project_id": project_id, "chapter_id": chapter_id},
                 metadata={"step": "synthesize", "backend": backend},
             ) as observation:
+                self.update_synthesis_progress(
+                    project_id,
+                    chapter_id,
+                    {"phase": "starting", "total_chunks": 0, "completed_chunks": 0, "current_chunk": 0},
+                )
                 ssml, audio = synthesize_chapter(
-                    self.store, project_id, chapter_id, get_tts_provider(backend), extension
+                    self.store,
+                    project_id,
+                    chapter_id,
+                    get_tts_provider(backend),
+                    extension,
+                    lambda patch: self.update_synthesis_progress(project_id, chapter_id, patch),
                 )
                 update_langfuse_observation(observation, output={"ssml": ssml, "output": audio})
             flush_langfuse()
@@ -455,12 +571,41 @@ class NarratorWebApp:
             logger.warning("ElevenLabs voices unavailable for auto-casting: %s", exc)
             return []
 
+    def synthesis_progress(self, project_id: str, chapter_id: str | None) -> dict:
+        if not chapter_id:
+            raise ValueError("chapter is required.")
+        key = (self.safe_project_id(project_id), self.safe_chapter_id(chapter_id))
+        with self._progress_lock:
+            progress = dict(self._synthesis_progress.get(key, {}))
+        return progress or {
+            "phase": "idle",
+            "total_chunks": 0,
+            "completed_chunks": 0,
+            "current_chunk": 0,
+        }
+
+    def update_synthesis_progress(self, project_id: str, chapter_id: str, patch: dict) -> None:
+        key = (self.safe_project_id(project_id), self.safe_chapter_id(chapter_id))
+        with self._progress_lock:
+            current = self._synthesis_progress.get(
+                key,
+                {"phase": "starting", "total_chunks": 0, "completed_chunks": 0, "current_chunk": 0},
+            )
+            self._synthesis_progress[key] = current | patch
+
     def load_chapter_manifests(self, project_id: str) -> list[dict]:
         paths = self.store.paths(project_id)
         rows = []
         for index, manifest_path in enumerate(sorted(paths.source.glob("*.manifest.json"))):
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest.setdefault("order", index)
+            manifest.setdefault("analyzed", (paths.memory / "chapters" / f"{manifest['chapter_id']}.json").exists())
+            manifest.setdefault("annotated", (paths.annotations / f"{manifest['chapter_id']}.jsonl").exists())
+            manifest.setdefault(
+                "pipeline_state",
+                "complete" if manifest["analyzed"] and manifest["annotated"] else "pending",
+            )
+            manifest.setdefault("pipeline_message", "")
             rows.append(manifest)
         return sorted(
             rows,
@@ -469,6 +614,75 @@ class NarratorWebApp:
                 natural_sort_key(str(row.get("chapter_id", ""))),
             ),
         )
+
+    def require_previous_chapter_analysis(self, project_id: str, chapter_id: str) -> None:
+        chapters = self.load_chapter_manifests(project_id)
+        for index, chapter in enumerate(chapters):
+            if chapter.get("chapter_id") != chapter_id:
+                continue
+            if index == 0:
+                return
+            previous = chapters[index - 1]
+            if previous.get("analyzed"):
+                return
+            self.update_chapter_status(
+                project_id,
+                chapter_id,
+                pipeline_state="paused",
+                pipeline_message=f"Waiting for prior chapter analysis: {previous.get('title') or previous['chapter_id']}",
+            )
+            self.mark_chapters_paused_after(
+                project_id,
+                chapter_id,
+                f"Waiting for prior chapter analysis: {previous.get('title') or previous['chapter_id']}",
+            )
+            raise ValueError(
+                "Analyze the previous chapter first so this chapter has the required context: "
+                f"{previous.get('title') or previous['chapter_id']}"
+            )
+
+    def mark_chapters_paused_after(self, project_id: str, chapter_id: str, message: str) -> None:
+        found = False
+        for chapter in self.load_chapter_manifests(project_id):
+            if chapter.get("chapter_id") == chapter_id:
+                found = True
+                continue
+            if found and not chapter.get("analyzed"):
+                self.update_chapter_status(
+                    project_id,
+                    chapter["chapter_id"],
+                    pipeline_state="paused",
+                    pipeline_message=message,
+                )
+
+    def cancel_pipeline_from(self, project_id: str, chapter_id: str) -> dict:
+        found = False
+        canceled = []
+        for chapter in self.load_chapter_manifests(project_id):
+            if chapter.get("chapter_id") == chapter_id:
+                found = True
+            if found and not (chapter.get("analyzed") and chapter.get("annotated")):
+                self._canceled_chapters.add((project_id, chapter["chapter_id"]))
+                self.update_chapter_status(
+                    project_id,
+                    chapter["chapter_id"],
+                    pipeline_state="canceled",
+                    pipeline_message=f"Canceled because {chapter_id} was canceled.",
+                )
+                canceled.append(chapter["chapter_id"])
+        return {"ok": True, "canceled": canceled}
+
+    def raise_if_chapter_canceled(self, project_id: str, chapter_id: str) -> None:
+        if (project_id, chapter_id) in self._canceled_chapters:
+            raise RuntimeError(f"Chapter analysis canceled: {chapter_id}")
+
+    def update_chapter_status(self, project_id: str, chapter_id: str, **updates: bool) -> None:
+        manifest_path = self.store.paths(project_id).source / f"{chapter_id}.manifest.json"
+        if not manifest_path.exists():
+            return
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest.update(updates)
+        self.store.write_json(manifest_path, manifest)
 
     def next_chapter_order(self, project_id: str, exclude_chapter_id: str | None = None) -> int:
         orders = [
@@ -516,12 +730,17 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                     parts = decoded_path_parts(parsed.path)
                     if len(parts) == 5 and parts[3] == "audio":
                         return self.serve_audio_file(parts[2], parts[4])
+                    if len(parts) == 4 and parts[3] == "synthesis-progress":
+                        chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
+                        return self.send_json(app.synthesis_progress(parts[2], chapter_id))
                     project_id = unquote(parsed.path.split("/")[3])
                     chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
                     return self.send_json(app.project_payload(project_id, chapter_id))
                 if parsed.path == "/api/elevenlabs/voices":
                     return self.send_json(app.elevenlabs_voices())
                 return self.send_static(parsed.path)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
             except Exception as exc:
                 return self.send_error_json(exc)
 
@@ -557,6 +776,8 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                         return self.send_json(app.reset_annotations(project_id, parts[4]))
                     if len(parts) == 5 and parts[3] == "delete-chapter":
                         return self.send_json(app.delete_chapter(project_id, parts[4]))
+                    if len(parts) == 5 and parts[3] == "cancel-pipeline":
+                        return self.send_json(app.cancel_pipeline_from(project_id, parts[4]))
                     if len(parts) == 4 and parts[3] == "delete-project":
                         return self.send_json(app.delete_project(project_id))
                     if len(parts) == 4 and parts[3] == "cast":
@@ -570,6 +791,8 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                             body.get("backend", "elevenlabs"),
                         ))
                 raise ValueError("Unknown API route.")
+            except (BrokenPipeError, ConnectionResetError):
+                return None
             except Exception as exc:
                 return self.send_error_json(exc)
 
@@ -581,37 +804,44 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
 
         def send_json(self, payload: dict, status: int = 200) -> None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.write_response(
+                status,
+                data,
+                {
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Content-Length": str(len(data)),
+                },
+            )
 
         def send_error_json(self, exc: Exception) -> None:
-            self.send_json({"ok": False, "error": str(exc)}, 500)
+            try:
+                self.send_json({"ok": False, "error": str(exc)}, 500)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
 
         def send_static(self, request_path: str) -> None:
             relative = "index.html" if request_path in {"", "/"} else request_path.lstrip("/")
             path = (STATIC_DIR / relative).resolve()
             if not str(path).startswith(str(STATIC_DIR.resolve())) or not path.exists():
-                self.send_response(404)
-                self.end_headers()
+                self.write_response(404, b"", {})
                 return
             data = path.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self.write_response(
+                200,
+                data,
+                {
+                    "Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                    "Cache-Control": "no-store",
+                    "Content-Length": str(len(data)),
+                },
+            )
 
         def serve_audio_file(self, project_id: str, chapter_id: str) -> None:
             project_id = app.safe_project_id(project_id)
             chapter_id = app.safe_chapter_id(chapter_id)
             audio_path = app.store.paths(project_id).audio / f"{chapter_id}.mp3"
             if not audio_path.exists():
-                self.send_response(404)
-                self.end_headers()
+                self.write_response(404, b"", {})
                 return
             file_size = audio_path.stat().st_size
             range_header = self.headers.get("Range", "")
@@ -621,24 +851,42 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                 end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
                 end = min(end, file_size - 1)
                 length = end - start + 1
-                self.send_response(206)
-                self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Content-Length", str(length))
-                self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Cache-Control", "no-store")
-                self.end_headers()
                 with open(audio_path, "rb") as f:
                     f.seek(start)
-                    self.wfile.write(f.read(length))
+                    data = f.read(length)
+                self.write_response(
+                    206,
+                    data,
+                    {
+                        "Content-Type": "audio/mpeg",
+                        "Content-Length": str(length),
+                        "Content-Range": f"bytes {start}-{end}/{file_size}",
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "no-store",
+                    },
+                )
             else:
-                self.send_response(200)
-                self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Content-Length", str(file_size))
-                self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Cache-Control", "no-store")
+                self.write_response(
+                    200,
+                    audio_path.read_bytes(),
+                    {
+                        "Content-Type": "audio/mpeg",
+                        "Content-Length": str(file_size),
+                        "Accept-Ranges": "bytes",
+                        "Cache-Control": "no-store",
+                    },
+                )
+
+        def write_response(self, status: int, data: bytes, headers: dict[str, str]) -> None:
+            try:
+                self.send_response(status)
+                for key, value in headers.items():
+                    self.send_header(key, value)
                 self.end_headers()
-                self.wfile.write(audio_path.read_bytes())
+                if data:
+                    self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                return None
 
         def log_message(self, format: str, *args: object) -> None:
             return

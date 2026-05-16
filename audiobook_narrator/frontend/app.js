@@ -11,12 +11,17 @@ const state = {
   elevenVoices: [],
   audioManifest: null,
   audioUrl: null,
+  audioPlaybackRate: 1,
   pendingDeleteChapterId: null,
   pendingDeleteBookId: null,
   pendingClearAnnotationsId: null,
   loadingElevenVoices: false,
   autoSaveTimer: null,
   autoSaving: false,
+  progressPollTimer: null,
+  pendingBulkImportFiles: [],
+  busyJobs: new Map(),
+  pipelineCanceled: false,
 };
 
 let previewAudio = null;
@@ -137,6 +142,7 @@ function initAudioPlayer() {
 
   chapterAudio = new Audio(state.audioUrl);
   chapterAudio.preload = "metadata";
+  chapterAudio.playbackRate = state.audioPlaybackRate;
 
   chapterAudio.addEventListener("loadedmetadata", () => {
     buildAudioTimings(chapterAudio.duration);
@@ -157,6 +163,15 @@ function initAudioPlayer() {
 
   const regenBtn = $("audio-regen-btn");
   if (regenBtn) regenBtn.addEventListener("click", () => runStep("synthesize"));
+
+  const speedSelect = $("audio-speed");
+  if (speedSelect) {
+    speedSelect.value = String(state.audioPlaybackRate);
+    speedSelect.addEventListener("change", (event) => {
+      state.audioPlaybackRate = Number(event.target.value) || 1;
+      if (chapterAudio) chapterAudio.playbackRate = state.audioPlaybackRate;
+    });
+  }
 
   const seekEl = $("audio-seek");
   if (seekEl) {
@@ -225,6 +240,16 @@ function renderAudioPlayer() {
           <span class="audio-info">${totalPassages} passages · ${chunkCount} chunk${chunkCount !== 1 ? "s" : ""}</span>
         </div>
       </div>
+      <label class="audio-speed-wrap" title="Playback speed">
+        <span>Speed</span>
+        <select id="audio-speed" class="audio-speed">
+          <option value="0.75">0.75x</option>
+          <option value="1">1x</option>
+          <option value="1.25">1.25x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2x</option>
+        </select>
+      </label>
       <button id="audio-regen-btn" class="audio-regen-btn" title="Regenerate audio for entire chapter">↺</button>
     </div>
   `;
@@ -256,12 +281,92 @@ function setStatus(message) {
 }
 
 function setBusy(isBusy, title = "Working", detail = "Waiting for the model...") {
-  $("busy-title").textContent = title;
-  $("busy-detail").textContent = detail;
-  $("busy-overlay").hidden = !isBusy;
-  document.querySelectorAll("button, input, select, textarea").forEach((element) => {
-    element.disabled = isBusy;
-  });
+  if (isBusy) {
+    upsertBusyJob("global", { title, detail });
+  } else {
+    removeBusyJob("global");
+  }
+}
+
+function upsertBusyJob(jobId, { title, detail, chapterId = null, cancellable = false, controller = null } = {}) {
+  state.busyJobs.set(jobId, { title, detail, chapterId, cancellable, controller, progress: state.busyJobs.get(jobId)?.progress || null });
+  renderBusyJobs();
+}
+
+function removeBusyJob(jobId) {
+  state.busyJobs.delete(jobId);
+  renderBusyJobs();
+}
+
+function renderBusyJobs() {
+  const overlay = $("busy-overlay");
+  const jobs = [...state.busyJobs.entries()];
+  overlay.hidden = jobs.length === 0;
+  overlay.innerHTML = jobs.map(([jobId, job]) => `
+    <div class="busy-box" data-job-id="${escapeAttr(jobId)}">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="busy-copy">
+        <strong>${escapeHtml(job.title || "Working")}</strong>
+        <p>${escapeHtml(job.detail || "Waiting for the model...")}</p>
+        <div class="busy-progress-wrap" ${job.progress?.total_chunks ? "" : "hidden"}>
+          <progress value="${Number(job.progress?.completed_chunks || 0)}" max="${Number(job.progress?.total_chunks || 1)}"></progress>
+          <span>${job.progress ? busyProgressLabel(job.progress) : ""}</span>
+        </div>
+      </div>
+      ${job.cancellable ? `<button class="busy-cancel" type="button" data-job-id="${escapeAttr(jobId)}">Cancel</button>` : ""}
+    </div>
+  `).join("");
+}
+
+function busyProgressLabel(progress) {
+  const completed = Number(progress.completed_chunks || 0);
+  const total = Number(progress.total_chunks || 0);
+  return progress.phase === "complete"
+    ? `${total} of ${total} chunks complete`
+    : `Chunk ${Number(progress.current_chunk || Math.min(completed + 1, total))} of ${total} · ${completed} complete`;
+}
+
+function setBusyProgress(progress) {
+  const job = state.busyJobs.get("global");
+  if (!job) return;
+  if (!progress || !progress.total_chunks) {
+    job.progress = null;
+    renderBusyJobs();
+    return;
+  }
+  job.progress = progress;
+  renderBusyJobs();
+}
+
+function stopSynthesisProgressPolling() {
+  if (!state.progressPollTimer) return;
+  clearInterval(state.progressPollTimer);
+  state.progressPollTimer = null;
+}
+
+function startSynthesisProgressPolling() {
+  stopSynthesisProgressPolling();
+  const poll = async () => {
+    if (!state.project || !state.selectedChapterId) return;
+    try {
+      const progress = await api(
+        `/api/projects/${encodeURIComponent(state.project.project_id)}/synthesis-progress?chapter=${encodeURIComponent(state.selectedChapterId)}`
+      );
+      setBusyProgress(progress);
+      if (progress.total_chunks) {
+        upsertBusyJob("global", {
+          ...state.busyJobs.get("global"),
+          detail: progress.phase === "complete"
+            ? "Finishing narration output..."
+            : `Generating chunk ${progress.current_chunk || 1} of ${progress.total_chunks}...`,
+        });
+      }
+    } catch {
+      // Progress polling is best-effort; the main Generate request remains authoritative.
+    }
+  };
+  poll();
+  state.progressPollTimer = setInterval(poll, 700);
 }
 
 function scheduleAutoSave() {
@@ -330,22 +435,72 @@ function renderProject(payload) {
 function renderToc() {
   $("toc-count").textContent = String(state.chapters.length);
   $("toc-list").innerHTML = state.chapters
-    .map((chapter, index) => `
-      <li class="toc-item ${chapter.chapter_id === state.selectedChapterId ? "active" : ""}"
+    .map((chapter, index) => {
+      const busyJob = state.busyJobs.get(chapter.chapter_id);
+      const tocState = chapterTocState(chapter, busyJob);
+      return `
+      <li class="toc-item ${chapter.chapter_id === state.selectedChapterId ? "active" : ""} ${escapeAttr(tocState.className)}"
         draggable="true"
         data-chapter-id="${escapeAttr(chapter.chapter_id)}">
         <span class="toc-handle" aria-hidden="true">☰</span>
         <button class="toc-title" title="${escapeAttr(chapter.title || chapter.chapter_id)}">
           ${index + 1}. ${escapeHtml(chapter.title || chapter.chapter_id)}
+          <span class="toc-state" title="${escapeAttr(tocState.title)}">
+            ${tocState.html}
+          </span>
         </button>
+        ${busyJob?.cancellable ? `<button class="toc-cancel" title="Cancel analysis from this chapter onward" data-chapter-id="${escapeAttr(chapter.chapter_id)}">×</button>` : ""}
         <button class="toc-delete danger" title="Delete chapter">×</button>
       </li>
-    `)
+    `;
+    })
     .join("") + `
       <li class="toc-add-row">
         <button id="new-chapter" class="toc-add" title="Add chapter">＋ Chapter</button>
       </li>
     `;
+}
+
+function chapterTocState(chapter, busyJob = null) {
+  if (busyJob) {
+    return { className: "is-running", title: busyJob.detail || busyJob.title, html: '<span class="mini-spinner"></span>' };
+  }
+  if (chapter.pipeline_state === "error") {
+    return { className: "is-error", title: chapter.pipeline_message || "Analysis failed", html: "!" };
+  }
+  if (chapter.pipeline_state === "paused") {
+    return { className: "is-paused", title: chapter.pipeline_message || "Paused", html: "Ⅱ" };
+  }
+  if (chapter.pipeline_state === "canceled") {
+    return { className: "is-canceled", title: chapter.pipeline_message || "Canceled", html: "×" };
+  }
+  if (chapter.analyzed && chapter.annotated) {
+    return { className: "is-complete", title: "Analyzed and annotated", html: "✓" };
+  }
+  return {
+    className: "is-pending",
+    title: `Analyzed${chapter.analyzed ? "" : " not"} · Annotated${chapter.annotated ? "" : " not"}`,
+    html: `${chapter.analyzed ? "A" : "·"}${chapter.annotated ? "N" : "·"}`,
+  };
+}
+
+function updateLocalChapterState(chapterId, patch) {
+  const chapter = state.chapters.find((row) => row.chapter_id === chapterId);
+  if (!chapter) return;
+  Object.assign(chapter, patch);
+}
+
+function markSubsequentChapters(chapterId, patch) {
+  let found = false;
+  for (const chapter of state.chapters) {
+    if (chapter.chapter_id === chapterId) {
+      found = true;
+      continue;
+    }
+    if (found && (!chapter.analyzed || !chapter.annotated)) {
+      Object.assign(chapter, patch);
+    }
+  }
 }
 
 function renderChapterHydration() {
@@ -879,12 +1034,18 @@ async function resetAnnotations() {
     });
     state.annotations = [];
     state.annotatedText = "";
+    state.audioManifest = null;
+    state.audioUrl = null;
+    const chapter = state.chapters.find((row) => row.chapter_id === state.selectedChapterId);
+    if (chapter) chapter.annotated = false;
     state.pendingClearAnnotationsId = null;
     button.textContent = "Clear";
     button.classList.remove("armed");
     renderAnnotationsPanel();
     renderTranscript();
-    setStatus("Chapter annotations cleared");
+    renderAudioPlayer();
+    renderToc();
+    setStatus("Chapter annotations and audio cleared");
   } catch (error) {
     setStatus(`Clear failed: ${error.message}`);
   }
@@ -1011,29 +1172,102 @@ async function saveCharacterVoiceAssignments() {
   });
 }
 
-async function runAnalyzeAnnotateCast() {
+async function runAnalyzeAnnotateBook() {
   if (!state.project) return;
-  setBusy(true, "Analyzing", "Updating plot, character memory, and story understanding...");
-  setStatus("Analyze + Annotate + Cast started");
+  const pending = state.chapters.filter((chapter) => !chapter.analyzed || !chapter.annotated);
+  if (!pending.length) {
+    setStatus("All chapters are already analyzed and annotated");
+    return;
+  }
+  state.pipelineCanceled = false;
+  setStatus(`Analyze + Annotate started for ${pending.length} chapter${pending.length === 1 ? "" : "s"}`);
   try {
-    const analyzePayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
-      method: "POST",
-      body: JSON.stringify({ step: "analyze", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
-    });
-    setBusy(true, "Casting Voices", "Assigning voices to characters and speakers...");
-    const castPayload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
-      method: "POST",
-      body: JSON.stringify({ step: "cast", chapter_id: state.selectedChapterId, backend: "elevenlabs" }),
-    });
+    for (const chapter of pending) {
+      if (state.pipelineCanceled) break;
+      if (!chapter.analyzed) {
+        upsertBusyJob(chapter.chapter_id, {
+          title: "Analyzing",
+          detail: `Updating memory for ${chapter.title || chapter.chapter_id}...`,
+          chapterId: chapter.chapter_id,
+          cancellable: true,
+          controller: new AbortController(),
+        });
+        updateLocalChapterState(chapter.chapter_id, { pipeline_state: "analyzing", pipeline_message: "Analyzing chapter context." });
+        renderToc();
+        await runChapterStep("analyze", chapter.chapter_id, { reload: false, controller: state.busyJobs.get(chapter.chapter_id)?.controller });
+        removeBusyJob(chapter.chapter_id);
+        updateLocalChapterState(chapter.chapter_id, { analyzed: true, pipeline_state: "analyzed", pipeline_message: "Analysis complete." });
+      }
+      if (state.pipelineCanceled) break;
+      if (!chapter.annotated) {
+        upsertBusyJob(chapter.chapter_id, {
+          title: "Annotating",
+          detail: `Directing ${chapter.title || chapter.chapter_id}...`,
+          chapterId: chapter.chapter_id,
+          cancellable: true,
+          controller: new AbortController(),
+        });
+        updateLocalChapterState(chapter.chapter_id, { pipeline_state: "annotating", pipeline_message: "Annotating chapter." });
+        renderToc();
+        await runChapterStep("annotate", chapter.chapter_id, { reload: false, controller: state.busyJobs.get(chapter.chapter_id)?.controller });
+        removeBusyJob(chapter.chapter_id);
+        updateLocalChapterState(chapter.chapter_id, { annotated: true, pipeline_state: "complete", pipeline_message: "Analysis and annotation complete." });
+      }
+      renderToc();
+    }
     await loadProject(state.project.project_id, state.selectedChapterId);
-    const llm = analyzePayload.llm
-      ? ` with ${analyzePayload.llm.provider}${analyzePayload.llm.model ? ` (${analyzePayload.llm.model})` : ""}`
-      : "";
-    setStatus(`Analyze + Annotate + Cast complete${llm}`);
+    setStatus(state.pipelineCanceled ? "Analyze + Annotate canceled" : "Analyze + Annotate complete");
   } catch (error) {
+    const failed = [...state.busyJobs.values()].find((job) => job.chapterId)?.chapterId;
+    if (failed) {
+      updateLocalChapterState(failed, { pipeline_state: "error", pipeline_message: error.message });
+      markSubsequentChapters(failed, { pipeline_state: "paused", pipeline_message: `Paused because ${failed} failed: ${error.message}` });
+      renderToc();
+    }
     setStatus(error.message);
   } finally {
-    setBusy(false);
+    state.busyJobs.clear();
+    renderBusyJobs();
+  }
+}
+
+async function runChapterStep(step, chapterId = state.selectedChapterId, { reload = true, controller = null } = {}) {
+  if (!state.project || !chapterId) return null;
+  const busyCopy = {
+    analyze: ["Analyzing", "Updating plot, character memory, and voices..."],
+    annotate: ["Annotating", "Directing this chapter..."],
+    synthesize: ["Generating", "Creating narration output..."],
+  }[step] || ["Working", "Processing..."];
+  const jobId = chapterId;
+  controller ||= reload ? new AbortController() : null;
+  if (reload) {
+    upsertBusyJob(jobId, {
+      title: busyCopy[0],
+      detail: busyCopy[1],
+      chapterId,
+      cancellable: step === "analyze" || step === "annotate",
+      controller,
+    });
+    setStatus(`${step} started`);
+  }
+  try {
+    const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
+      method: "POST",
+      body: JSON.stringify({ step, chapter_id: chapterId, backend: "elevenlabs" }),
+      signal: controller?.signal,
+    });
+    if (reload) {
+      await loadProject(state.project.project_id, chapterId);
+      const llm = payload.llm ? ` with ${payload.llm.provider}${payload.llm.model ? ` (${payload.llm.model})` : ""}` : "";
+      setStatus(`${step} complete${llm}`);
+    }
+    return payload;
+  } catch (error) {
+    if (reload) setStatus(error.name === "AbortError" ? `${step} canceled` : error.message);
+    if (error.name !== "AbortError") throw error;
+    return null;
+  } finally {
+    if (reload) removeBusyJob(jobId);
   }
 }
 
@@ -1043,6 +1277,7 @@ async function runStep(step) {
     synthesize: ["Generating", "Creating narration output..."],
   }[step] || ["Working", "Processing..."];
   setBusy(true, busyCopy[0], busyCopy[1]);
+  if (step === "synthesize") startSynthesisProgressPolling();
   setStatus(`${step} started`);
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
@@ -1059,6 +1294,7 @@ async function runStep(step) {
   } catch (error) {
     setStatus(error.message);
   } finally {
+    if (step === "synthesize") stopSynthesisProgressPolling();
     setBusy(false);
   }
 }
@@ -1082,13 +1318,13 @@ async function importFiles(fileList) {
     await importFile(files[0]);
     return;
   }
-  await bulkImportFiles(files);
+  openBulkImportModal(files);
 }
 
-async function bulkImportFiles(fileList) {
+async function bulkImportFiles(fileList, { analyze = false } = {}) {
   if (!state.project || !fileList?.length) return;
-  const files = Array.from(fileList).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-  setBusy(true, "Importing", `Importing and analyzing ${files.length} chapters in order...`);
+  const files = Array.from(fileList);
+  setBusy(true, "Importing", analyze ? `Importing ${files.length} chapters in order...` : `Adding ${files.length} chapter source files...`);
   setStatus(`Import started for ${files.length} chapters`);
   try {
     const uploads = [];
@@ -1097,15 +1333,50 @@ async function bulkImportFiles(fileList) {
     }
     const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/bulk-import`, {
       method: "POST",
-      body: JSON.stringify({ files: uploads, analyze: true }),
+      body: JSON.stringify({ files: uploads, analyze: false }),
     });
     await loadProject(state.project.project_id);
-    setStatus(`Imported ${payload.manifests?.length || 0} chapters and updated memory`);
+    if (analyze) {
+      await runAnalyzeAnnotateBook();
+    } else {
+      setStatus(`Added ${payload.manifests?.length || 0} chapter source files`);
+    }
   } catch (error) {
     setStatus(`Import failed: ${error.message}`);
   } finally {
     setBusy(false);
   }
+}
+
+function openBulkImportModal(files) {
+  state.pendingBulkImportFiles = Array.from(files).sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, { numeric: true })
+  );
+  renderBulkImportOrder();
+  $("bulk-import-modal").showModal();
+}
+
+function renderBulkImportOrder() {
+  $("bulk-import-list").innerHTML = state.pendingBulkImportFiles
+    .map((file, index) => `
+      <li class="bulk-import-item" data-index="${index}">
+        <span class="bulk-import-rank">${index + 1}</span>
+        <span class="bulk-import-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</span>
+        <div class="bulk-import-actions">
+          <button type="button" class="bulk-import-move" data-direction="up" title="Move earlier" ${index === 0 ? "disabled" : ""}>↑</button>
+          <button type="button" class="bulk-import-move" data-direction="down" title="Move later" ${index === state.pendingBulkImportFiles.length - 1 ? "disabled" : ""}>↓</button>
+        </div>
+      </li>
+    `)
+    .join("");
+}
+
+function movePendingBulkImportFile(index, direction) {
+  const nextIndex = direction === "up" ? index - 1 : index + 1;
+  if (nextIndex < 0 || nextIndex >= state.pendingBulkImportFiles.length) return;
+  const [file] = state.pendingBulkImportFiles.splice(index, 1);
+  state.pendingBulkImportFiles.splice(nextIndex, 0, file);
+  renderBulkImportOrder();
 }
 
 function readAsDataUrl(file) {
@@ -1195,6 +1466,32 @@ function wireEvents() {
   document.querySelectorAll(".close-modal").forEach((button) => {
     button.addEventListener("click", () => $("book-modal").close());
   });
+  $("close-bulk-import-modal").addEventListener("click", () => {
+    state.pendingBulkImportFiles = [];
+    $("bulk-import-modal").close();
+  });
+  $("cancel-bulk-import").addEventListener("click", () => {
+    state.pendingBulkImportFiles = [];
+    $("bulk-import-modal").close();
+  });
+  $("bulk-import-list").addEventListener("click", (event) => {
+    const button = event.target.closest(".bulk-import-move");
+    if (!button) return;
+    const item = button.closest(".bulk-import-item");
+    movePendingBulkImportFile(Number(item.dataset.index), button.dataset.direction);
+  });
+  $("confirm-bulk-import").addEventListener("click", async () => {
+    const files = [...state.pendingBulkImportFiles];
+    state.pendingBulkImportFiles = [];
+    $("bulk-import-modal").close();
+    await bulkImportFiles(files, { analyze: true });
+  });
+  $("import-source-only").addEventListener("click", async () => {
+    const files = [...state.pendingBulkImportFiles];
+    state.pendingBulkImportFiles = [];
+    $("bulk-import-modal").close();
+    await bulkImportFiles(files, { analyze: false });
+  });
 
   $("project-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -1211,6 +1508,14 @@ function wireEvents() {
   });
 
   $("project-select").addEventListener("change", (event) => loadProject(event.target.value));
+  $("busy-overlay").addEventListener("click", (event) => {
+    const button = event.target.closest(".busy-cancel");
+    if (!button) return;
+    const job = state.busyJobs.get(button.dataset.jobId);
+    job?.controller?.abort();
+    if (job?.chapterId) cancelPipelineFromChapter(job.chapterId);
+    removeBusyJob(button.dataset.jobId);
+  });
   $("rename-book").addEventListener("click", renameCurrentBook);
   $("toc-list").addEventListener("click", (event) => {
     if (event.target.closest("#new-chapter")) {
@@ -1262,7 +1567,7 @@ function wireEvents() {
   $("save-characters").addEventListener("click", saveCharacterProfiles);
   $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
-  $("run-pipeline").addEventListener("click", runAnalyzeAnnotateCast);
+  $("run-pipeline").addEventListener("click", runAnalyzeAnnotateBook);
   $("narration-mode").addEventListener("change", async () => {
     if (!state.project) return;
     const mode = $("narration-mode").value;
@@ -1278,6 +1583,8 @@ function wireEvents() {
     }
   });
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
+  $("analyze-chapter").addEventListener("click", () => runChapterStep("analyze"));
+  $("annotate-chapter").addEventListener("click", () => runChapterStep("annotate"));
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
   $("import-file").addEventListener("click", () => $("file-input").click());
@@ -1353,6 +1660,28 @@ function wireEvents() {
   });
 }
 
+async function cancelPipelineFromChapter(chapterId) {
+  state.pipelineCanceled = true;
+  const job = state.busyJobs.get(chapterId);
+  job?.controller?.abort();
+  if (state.project) {
+    try {
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/cancel-pipeline/${encodeURIComponent(chapterId)}`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+    } catch (error) {
+      setStatus(`Cancel request failed: ${error.message}`);
+    }
+  }
+  updateLocalChapterState(chapterId, { pipeline_state: "canceled", pipeline_message: "Canceled by user." });
+  markSubsequentChapters(chapterId, { pipeline_state: "canceled", pipeline_message: `Canceled because ${chapterId} was canceled.` });
+  state.busyJobs.clear();
+  renderBusyJobs();
+  renderToc();
+  setStatus(`Canceled analysis from ${chapterId} onward`);
+}
+
 function clearChapterUi() {
   state.selectedChapterId = null;
   state.audioManifest = null;
@@ -1425,3 +1754,8 @@ window.addEventListener("DOMContentLoaded", async () => {
     setStatus(error.message);
   }
 });
+    const cancelButton = event.target.closest(".toc-cancel");
+    if (cancelButton) {
+      cancelPipelineFromChapter(cancelButton.dataset.chapterId);
+      return;
+    }

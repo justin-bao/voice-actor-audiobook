@@ -26,6 +26,7 @@ from audiobook_narrator.providers import (
     HeuristicLLMProvider,
     ScriptOnlyTTSProvider,
     provider_summary,
+    retry_rate_limited,
     tls_context,
 )
 from audiobook_narrator.storage import ProjectStore
@@ -223,8 +224,9 @@ class StaticCastProvider:
 
 
 class FakeHTTPResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: dict | bytes, status: int | None = None) -> None:
         self.payload = payload
+        self.status = status
 
     def __enter__(self) -> "FakeHTTPResponse":
         return self
@@ -235,7 +237,16 @@ class FakeHTTPResponse:
     def read(self) -> bytes:
         import json
 
+        if isinstance(self.payload, bytes):
+            return self.payload
         return json.dumps(self.payload).encode("utf-8")
+
+
+class FakeRateLimitError(Exception):
+    def __init__(self, retry_after: str | None = None) -> None:
+        self.status_code = 429
+        self.response = type("Response", (), {"status_code": 429, "headers": {"Retry-After": retry_after} if retry_after else {}})()
+        super().__init__("rate limited")
 
 
 class PipelineTest(unittest.TestCase):
@@ -316,8 +327,8 @@ class PipelineTest(unittest.TestCase):
 
             memory = update_story_memory(store, "book", provider)
 
-            self.assertEqual(len(provider.users), 4)
-            self.assertIn("ch01 summary", provider.users[2])
+            self.assertEqual(len(provider.users), 2)
+            self.assertIn("ch01 summary", provider.users[1])
             self.assertEqual(memory.current_state, "ch02 state")
             self.assertEqual(store.load_chapter_memory("book", "ch01").plot_summary, "ch01 summary")
             self.assertEqual(store.load_chapter_memory("book", "ch02").plot_summary, "ch02 summary")
@@ -526,9 +537,10 @@ class PipelineTest(unittest.TestCase):
 
     def test_elevenlabs_audio_tags_are_normalized_to_allowlist(self) -> None:
         self.assertEqual(
-            normalize_audio_tags(["[suspense]", "[not a tag]", "whispering", "urgent"]),
+            normalize_audio_tags(["[suspense]", "[not a tag]", "whispering", "urgent", "long pause"]),
             ["[tense]", "[whispers]", "[shouts]"],
         )
+        self.assertEqual(normalize_audio_tags(["[short pause]", "[pause]", "[long pause]"]), ["[short pause]", "[pause]", "[long pause]"])
 
     def test_elevenlabs_voice_listing_follows_pagination(self) -> None:
         requests = []
@@ -594,8 +606,46 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(chunks[0]["inputs"][1]["text"], "[whispers] “你好。”汪淼说。")
         self.assertEqual(chunks[0]["manifest"][1]["audio_tags"], ["[whispers]"])
 
+    def test_elevenlabs_stream_dialogue_logs_success(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_path = Path(tmp) / "chunk.mp3"
+            with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test-key"}, clear=False):
+                provider = ElevenLabsTTSProvider()
+                with patch("urllib.request.urlopen", return_value=FakeHTTPResponse(b"mp3-data", status=200)):
+                    with self.assertLogs("audiobook_narrator.providers", level="INFO") as logs:
+                        provider._stream_dialogue([{"text": "你好", "voice_id": "voice-1"}], output_path)
+
+        joined = "\n".join(logs.output)
+        self.assertIn("TTS provider=elevenlabs request_start", joined)
+        self.assertIn("TTS provider=elevenlabs request_complete", joined)
+        self.assertIn("status=200", joined)
+        self.assertIn("bytes=8", joined)
+
     def test_provider_summary_names_heuristic_provider(self) -> None:
         self.assertEqual(provider_summary(HeuristicLLMProvider()), {"provider": "heuristic", "model": None})
+
+    def test_retry_rate_limited_uses_retry_after_then_succeeds(self) -> None:
+        calls = 0
+
+        def flaky():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise FakeRateLimitError("3")
+            return "ok"
+
+        with patch("time.sleep") as sleep:
+            result = retry_rate_limited("openai", "complete_json", flaky)
+
+        self.assertEqual(result, "ok")
+        sleep.assert_called_once_with(3.0)
+
+    def test_retry_rate_limited_does_not_retry_non_429(self) -> None:
+        with patch("time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                retry_rate_limited("openai", "complete_json", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+        sleep.assert_not_called()
 
     def test_tls_context_uses_a_ca_store(self) -> None:
         context = tls_context()

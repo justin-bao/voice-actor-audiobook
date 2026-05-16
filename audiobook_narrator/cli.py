@@ -9,6 +9,7 @@ from audiobook_narrator.cast import build_cast
 from audiobook_narrator.ingest import ingest_chapter
 from audiobook_narrator.providers import ElevenLabsTTSProvider, get_llm_provider, get_tts_provider
 from audiobook_narrator.storage import ProjectStore
+from audiobook_narrator.storage import list_source_chapter_paths
 from audiobook_narrator.synthesize import synthesize_chapter
 
 
@@ -29,21 +30,34 @@ def cmd_ingest(args: argparse.Namespace) -> None:
 
 
 def cmd_analyze(args: argparse.Namespace) -> None:
-    memory = update_story_memory(
-        store_from(args.projects_dir), args.project_id, get_llm_provider(not args.no_openai)
-    )
+    store = store_from(args.projects_dir)
+    provider = get_llm_provider(not args.no_openai)
+    memory = None
+    annotated_count = 0
+    for source_path in list_source_chapter_paths(store.paths(args.project_id).source):
+        chapter_id = source_path.stem
+        memory = update_story_memory(store, args.project_id, provider, chapter_ids={chapter_id})
+        annotated = annotate_project(store, args.project_id, provider, chapter_ids={chapter_id})
+        annotated_count += sum(len(passages) for passages in annotated.values())
+    memory = memory or store.load_memory(args.project_id)
     print(
         f"Memory updated: {len(memory.chapter_summaries)} chapters, "
-        f"{len(memory.characters)} characters"
+        f"{len(memory.characters)} characters; annotated {annotated_count} passages sequentially"
     )
 
 
 def cmd_annotate(args: argparse.Namespace) -> None:
-    annotated = annotate_project(
-        store_from(args.projects_dir), args.project_id, get_llm_provider(not args.no_openai)
-    )
-    count = sum(len(passages) for passages in annotated.values())
-    print(f"Annotated {count} passages across {len(annotated)} chapters")
+    store = store_from(args.projects_dir)
+    provider = get_llm_provider(not args.no_openai)
+    count = 0
+    chapters = 0
+    for source_path in list_source_chapter_paths(store.paths(args.project_id).source):
+        chapter_id = source_path.stem
+        update_story_memory(store, args.project_id, provider, chapter_ids={chapter_id})
+        annotated = annotate_project(store, args.project_id, provider, chapter_ids={chapter_id})
+        count += sum(len(passages) for passages in annotated.values())
+        chapters += len(annotated)
+    print(f"Annotated {count} passages across {chapters} chapters sequentially")
 
 
 def cmd_cast(args: argparse.Namespace) -> None:
@@ -124,13 +138,13 @@ def build_parser() -> argparse.ArgumentParser:
     add_project_dir(ingest)
     ingest.set_defaults(func=cmd_ingest)
 
-    analyze = sub.add_parser("analyze", help="Update plot and character memory.")
+    analyze = sub.add_parser("analyze", help="Analyze and annotate chapters sequentially.")
     analyze.add_argument("--project-id", required=True)
     analyze.add_argument("--no-openai", action="store_true")
     add_project_dir(analyze)
     analyze.set_defaults(func=cmd_analyze)
 
-    annotate = sub.add_parser("annotate", help="Annotate passages for performance.")
+    annotate = sub.add_parser("annotate", help="Re-analyze and annotate chapters sequentially.")
     annotate.add_argument("--project-id", required=True)
     annotate.add_argument("--no-openai", action="store_true")
     add_project_dir(annotate)
