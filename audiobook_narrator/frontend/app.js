@@ -1522,6 +1522,11 @@ function wireEvents() {
       createNewChapter();
       return;
     }
+    const cancelButton = event.target.closest(".toc-cancel");
+    if (cancelButton) {
+      cancelPipelineFromChapter(cancelButton.dataset.chapterId);
+      return;
+    }
     const deleteButton = event.target.closest(".toc-delete");
     if (deleteButton) {
       const item = deleteButton.closest(".toc-item");
@@ -1754,8 +1759,3 @@ window.addEventListener("DOMContentLoaded", async () => {
     setStatus(error.message);
   }
 });
-    const cancelButton = event.target.closest(".toc-cancel");
-    if (cancelButton) {
-      cancelPipelineFromChapter(cancelButton.dataset.chapterId);
-      return;
-    }
