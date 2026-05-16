@@ -1498,7 +1498,7 @@ async function startGenerate() {
   chapterIds.forEach((id) => state.generatingChapters.add(id));
   renderToc();
   setStatus(`Generating ${chapterIds.length} chapter${chapterIds.length > 1 ? "s" : ""}…`);
-  const promises = chapterIds.map(async (chapterId) => {
+  await runWithConcurrency(chapterIds, 5, async (chapterId) => {
     try {
       await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
         method: "POST",
@@ -1513,11 +1513,21 @@ async function startGenerate() {
       renderToc();
     }
   });
-  await Promise.allSettled(promises);
   if (state.selectedChapterId && chapterIds.includes(state.selectedChapterId)) {
     await loadProject(state.project.project_id, state.selectedChapterId);
   }
   setStatus(`Generation complete`);
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items];
+  const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      await worker(item);
+    }
+  });
+  await Promise.allSettled(runners);
 }
 
 function wireSidebarResize() {
