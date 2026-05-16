@@ -210,21 +210,6 @@ textarea:focus-visible {
   flex: 1;
 }
 
-.toc-gen-btn {
-  min-height: 0;
-  height: 22px;
-  padding: 0 8px;
-  font-size: 11px;
-  border-color: #3c594f;
-  background: #203630;
-  color: #b8ccc4;
-}
-
-.toc-gen-btn:hover {
-  background: #2a4a42;
-  color: #eef7f3;
-  border-color: var(--accent-2);
-}
 
 .toc-list {
   min-height: 0;
