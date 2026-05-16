@@ -560,12 +560,14 @@ class NarratorWebApp:
                     combined.write(chunk_path.read_bytes())
         return {"ok": True, "chunk_index": chunk_index}
 
-    def download_book_audio(self, project_id: str) -> tuple[bytes, str]:
-        """Concatenate all chapter MP3s in order and return raw bytes + suggested filename."""
+    def download_book_audio(self, project_id: str, chapter_ids: list[str] | None = None) -> tuple[bytes, str]:
         project_id = self.safe_project_id(project_id)
         paths = self.store.paths(project_id)
         config = self.store.load_config(project_id)
         chapters = self.load_chapter_manifests(project_id)
+        if chapter_ids is not None:
+            allowed = set(chapter_ids)
+            chapters = [c for c in chapters if c.get("chapter_id") in allowed]
         chunks: list[bytes] = []
         for chapter in chapters:
             chapter_id = chapter.get("chapter_id", "")
@@ -573,14 +575,10 @@ class NarratorWebApp:
             if mp3.exists():
                 chunks.append(mp3.read_bytes())
         if not chunks:
-            raise ValueError("No generated audio found for this book.")
+            raise ValueError("No generated audio found for the selected chapters.")
         safe_title = re.sub(r"[^\w\s-]", "", config.title).strip().replace(" ", "_") or project_id
         filename = f"{safe_title}.mp3"
         return b"".join(chunks), filename
-
-
-        voices = ElevenLabsTTSProvider().list_voices()
-        return {"voices": voices}
 
     def safe_elevenlabs_voices(self) -> list[dict]:
         try:
@@ -861,8 +859,10 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
             )
 
         def serve_book_download(self, project_id: str) -> None:
+            chapters_param = parse_qs(urlparse(self.path).query).get("chapters", [None])[0]
+            chapter_ids = [c.strip() for c in chapters_param.split(",") if c.strip()] if chapters_param else None
             try:
-                data, filename = app.download_book_audio(project_id)
+                data, filename = app.download_book_audio(project_id, chapter_ids)
             except ValueError as exc:
                 return self.send_error_json(exc)
             self.write_response(

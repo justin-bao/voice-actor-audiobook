@@ -209,6 +209,24 @@
       </div>
     </dialog>
 
+    <dialog id="download-modal" class="modal generate-modal">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2>Download Book Audio</h2>
+          <button type="button" class="close-download" title="Close">×</button>
+        </div>
+        <div class="generate-select-row">
+          <button id="download-select-all">All</button>
+          <button id="download-select-none">None</button>
+        </div>
+        <div id="download-chapter-list" class="generate-chapter-list"></div>
+        <div class="modal-actions">
+          <button type="button" class="close-download">Cancel</button>
+          <button id="start-download">⬇ Download selected</button>
+        </div>
+      </div>
+    </dialog>
+
     <script src="/app.js?v=20260515-sequential-pipeline"></script>
   </body>
 </html>
