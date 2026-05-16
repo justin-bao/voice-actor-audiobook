@@ -560,7 +560,25 @@ class NarratorWebApp:
                     combined.write(chunk_path.read_bytes())
         return {"ok": True, "chunk_index": chunk_index}
 
-    def elevenlabs_voices(self) -> dict:
+    def download_book_audio(self, project_id: str) -> tuple[bytes, str]:
+        """Concatenate all chapter MP3s in order and return raw bytes + suggested filename."""
+        project_id = self.safe_project_id(project_id)
+        paths = self.store.paths(project_id)
+        config = self.store.load_config(project_id)
+        chapters = self.load_chapter_manifests(project_id)
+        chunks: list[bytes] = []
+        for chapter in chapters:
+            chapter_id = chapter.get("chapter_id", "")
+            mp3 = paths.audio / f"{chapter_id}.mp3"
+            if mp3.exists():
+                chunks.append(mp3.read_bytes())
+        if not chunks:
+            raise ValueError("No generated audio found for this book.")
+        safe_title = re.sub(r"[^\w\s-]", "", config.title).strip().replace(" ", "_") or project_id
+        filename = f"{safe_title}.mp3"
+        return b"".join(chunks), filename
+
+
         voices = ElevenLabsTTSProvider().list_voices()
         return {"voices": voices}
 
@@ -734,6 +752,8 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                     parts = decoded_path_parts(parsed.path)
                     if len(parts) == 5 and parts[3] == "audio":
                         return self.serve_audio_file(parts[2], parts[4])
+                    if len(parts) == 4 and parts[3] == "download":
+                        return self.serve_book_download(parts[2])
                     if len(parts) == 4 and parts[3] == "synthesis-progress":
                         chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
                         return self.send_json(app.synthesis_progress(parts[2], chapter_id))
@@ -837,6 +857,22 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                     "Content-Type": mimetypes.guess_type(path.name)[0] or "application/octet-stream",
                     "Cache-Control": "no-store",
                     "Content-Length": str(len(data)),
+                },
+            )
+
+        def serve_book_download(self, project_id: str) -> None:
+            try:
+                data, filename = app.download_book_audio(project_id)
+            except ValueError as exc:
+                return self.send_error_json(exc)
+            self.write_response(
+                200,
+                data,
+                {
+                    "Content-Type": "audio/mpeg",
+                    "Content-Length": str(len(data)),
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-store",
                 },
             )
 

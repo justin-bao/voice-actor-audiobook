@@ -1697,6 +1697,15 @@ function wireEvents() {
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
   $("import-file").addEventListener("click", () => $("file-input").click());
   $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
+  $("download-book-audio").addEventListener("click", () => {
+    if (!state.project) return;
+    const a = document.createElement("a");
+    a.href = `/api/projects/${encodeURIComponent(state.project.project_id)}/download`;
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  });
   $("file-input").addEventListener("change", (event) => importFiles(event.target.files));
   $("add-pronunciation").addEventListener("click", () => {
     $("pronunciation-list").insertAdjacentHTML("beforeend", pronunciationRow());
