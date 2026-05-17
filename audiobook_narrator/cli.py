@@ -6,6 +6,7 @@ from pathlib import Path
 from audiobook_narrator.analyze import update_story_memory
 from audiobook_narrator.annotate import annotate_project
 from audiobook_narrator.cast import build_cast
+from audiobook_narrator.cloud_storage import SupabaseProjectSync
 from audiobook_narrator.ingest import ingest_chapter
 from audiobook_narrator.providers import ElevenLabsTTSProvider, get_llm_provider, get_tts_provider
 from audiobook_narrator.storage import ProjectStore
@@ -107,6 +108,24 @@ def cmd_run(args: argparse.Namespace) -> None:
     print(f"Done. Output: {audio_path}")
 
 
+def cmd_cloud_push(args: argparse.Namespace) -> None:
+    sync = SupabaseProjectSync.from_env()
+    result = sync.push_project(store_from(args.projects_dir / sync.config.owner_id), args.project_id)
+    print(
+        f"Pushed {result['project_id']}: "
+        f"{result['chapters']} chapters, {result['artifacts']} artifacts"
+    )
+
+
+def cmd_cloud_pull(args: argparse.Namespace) -> None:
+    sync = SupabaseProjectSync.from_env()
+    result = sync.pull_project(store_from(args.projects_dir / sync.config.owner_id), args.project_id)
+    print(
+        f"Pulled {result['project_id']}: "
+        f"{result['chapters']} chapters, {result['artifacts']} artifacts"
+    )
+
+
 def extension_for_backend(backend: str) -> str:
     if backend in {"elevenlabs", "openai"}:
         return ".mp3"
@@ -179,6 +198,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_project_dir(run)
     run.set_defaults(func=cmd_run)
+
+    cloud_push = sub.add_parser("cloud-push", help="Upload a local project to Supabase.")
+    cloud_push.add_argument("--project-id", required=True)
+    add_project_dir(cloud_push)
+    cloud_push.set_defaults(func=cmd_cloud_push)
+
+    cloud_pull = sub.add_parser("cloud-pull", help="Restore a project from Supabase.")
+    cloud_pull.add_argument("--project-id", required=True)
+    add_project_dir(cloud_pull)
+    cloud_pull.set_defaults(func=cmd_cloud_pull)
     return parser
 
 

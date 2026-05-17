@@ -14,8 +14,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from audiobook_narrator.analyze import update_story_memory
+from audiobook_narrator.auth import SupabaseAuthService
 from audiobook_narrator.annotate import annotate_project
 from audiobook_narrator.cast import build_cast
+from audiobook_narrator.captions import export_captioned_video
 from audiobook_narrator.document_import import import_document_text, title_from_filename
 from audiobook_narrator.evals import evaluate_analysis, evaluate_annotations, evaluate_cast
 from audiobook_narrator.ingest import ingest_chapter
@@ -55,11 +57,21 @@ def natural_sort_key(value: str) -> list[object]:
 
 
 class NarratorWebApp:
-    def __init__(self, projects_dir: Path) -> None:
-        self.store = ProjectStore(projects_dir)
+    def __init__(self, projects_dir: Path, user_id: str | None = None) -> None:
+        self.projects_dir = projects_dir
+        self.user_id = user_id
+        self.store = ProjectStore(projects_dir if user_id is None else projects_dir / user_id)
         self._synthesis_progress: dict[tuple[str, str], dict] = {}
         self._progress_lock = threading.Lock()
         self._canceled_chapters: set[tuple[str, str]] = set()
+        self._user_apps: dict[str, "NarratorWebApp"] = {}
+
+    def for_user(self, user_id: str) -> "NarratorWebApp":
+        if self.user_id == user_id:
+            return self
+        if user_id not in self._user_apps:
+            self._user_apps[user_id] = NarratorWebApp(self.projects_dir, user_id=user_id)
+        return self._user_apps[user_id]
 
     def list_projects(self) -> dict:
         projects = []
@@ -529,6 +541,11 @@ class NarratorWebApp:
                 update_langfuse_observation(observation, output={"ssml": ssml, "output": audio})
             flush_langfuse()
             return {"ok": True, "ssml": ssml, "output": audio}
+        if step == "captioned_video":
+            if not chapter_id:
+                raise ValueError("chapter_id is required for captioned video export.")
+            output = export_captioned_video(self.store, project_id, chapter_id)
+            return {"ok": True, **output}
         raise ValueError(f"Unknown step: {step}")
 
     def regenerate_chunk(self, project_id: str, chapter_id: str, chunk_index: int, backend: str) -> dict:
@@ -739,27 +756,32 @@ class NarratorWebApp:
             suffix += 1
 
 
-def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
+def make_handler(app: NarratorWebApp, auth_service: SupabaseAuthService | None = None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             try:
                 parsed = urlparse(self.path)
+                if parsed.path == "/api/config":
+                    if not auth_service:
+                        raise RuntimeError("Supabase auth is not configured.")
+                    return self.send_json(auth_service.public_config())
+                active_app = self.active_app(parsed.path)
                 if parsed.path == "/api/projects":
-                    return self.send_json(app.list_projects())
+                    return self.send_json(active_app.list_projects())
                 if parsed.path.startswith("/api/projects/"):
                     parts = decoded_path_parts(parsed.path)
                     if len(parts) == 5 and parts[3] == "audio":
-                        return self.serve_audio_file(parts[2], parts[4])
+                        return self.serve_audio_file(active_app, parts[2], parts[4])
                     if len(parts) == 4 and parts[3] == "download":
-                        return self.serve_book_download(parts[2])
+                        return self.serve_book_download(active_app, parts[2])
                     if len(parts) == 4 and parts[3] == "synthesis-progress":
                         chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
-                        return self.send_json(app.synthesis_progress(parts[2], chapter_id))
+                        return self.send_json(active_app.synthesis_progress(parts[2], chapter_id))
                     project_id = unquote(parsed.path.split("/")[3])
                     chapter_id = parse_qs(parsed.query).get("chapter", [None])[0]
-                    return self.send_json(app.project_payload(project_id, chapter_id))
+                    return self.send_json(active_app.project_payload(project_id, chapter_id))
                 if parsed.path == "/api/elevenlabs/voices":
-                    return self.send_json(app.elevenlabs_voices())
+                    return self.send_json(active_app.elevenlabs_voices())
                 return self.send_static(parsed.path)
             except (BrokenPipeError, ConnectionResetError):
                 return None
@@ -770,44 +792,45 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
             try:
                 body = self.read_json()
                 parts = decoded_path_parts(self.path)
+                active_app = self.active_app(self.path)
                 if parts == ["api", "projects"]:
-                    return self.send_json(app.create_project(body))
+                    return self.send_json(active_app.create_project(body))
                 if len(parts) >= 3 and parts[:2] == ["api", "projects"]:
                     project_id = parts[2]
                     if len(parts) == 4 and parts[3] == "chapters":
-                        return self.send_json(app.save_chapter(project_id, body))
+                        return self.send_json(active_app.save_chapter(project_id, body))
                     if len(parts) == 4 and parts[3] == "rename":
-                        return self.send_json(app.rename_project(project_id, body))
+                        return self.send_json(active_app.rename_project(project_id, body))
                     if len(parts) == 4 and parts[3] == "chapters-reorder":
-                        return self.send_json(app.reorder_chapters(project_id, body))
+                        return self.send_json(active_app.reorder_chapters(project_id, body))
                     if len(parts) == 4 and parts[3] == "import":
-                        return self.send_json(app.import_chapter(project_id, body))
+                        return self.send_json(active_app.import_chapter(project_id, body))
                     if len(parts) == 4 and parts[3] == "bulk-import":
-                        return self.send_json(app.bulk_import(project_id, body))
+                        return self.send_json(active_app.bulk_import(project_id, body))
                     if len(parts) == 4 and parts[3] == "config":
-                        return self.send_json(app.update_config(project_id, body))
+                        return self.send_json(active_app.update_config(project_id, body))
                     if len(parts) == 4 and parts[3] == "memory":
-                        return self.send_json(app.save_memory(project_id, body))
+                        return self.send_json(active_app.save_memory(project_id, body))
                     if len(parts) == 5 and parts[3] == "chapter-memory":
-                        return self.send_json(app.save_chapter_memory(project_id, parts[4], body))
+                        return self.send_json(active_app.save_chapter_memory(project_id, parts[4], body))
                     if len(parts) == 5 and parts[3] == "annotations":
-                        return self.send_json(app.save_annotations(project_id, parts[4], body))
+                        return self.send_json(active_app.save_annotations(project_id, parts[4], body))
                     if len(parts) == 5 and parts[3] == "annotated-text":
-                        return self.send_json(app.save_annotated_text(project_id, parts[4], body))
+                        return self.send_json(active_app.save_annotated_text(project_id, parts[4], body))
                     if len(parts) == 5 and parts[3] == "reset-annotations":
-                        return self.send_json(app.reset_annotations(project_id, parts[4]))
+                        return self.send_json(active_app.reset_annotations(project_id, parts[4]))
                     if len(parts) == 5 and parts[3] == "delete-chapter":
-                        return self.send_json(app.delete_chapter(project_id, parts[4]))
+                        return self.send_json(active_app.delete_chapter(project_id, parts[4]))
                     if len(parts) == 5 and parts[3] == "cancel-pipeline":
-                        return self.send_json(app.cancel_pipeline_from(project_id, parts[4]))
+                        return self.send_json(active_app.cancel_pipeline_from(project_id, parts[4]))
                     if len(parts) == 4 and parts[3] == "delete-project":
-                        return self.send_json(app.delete_project(project_id))
+                        return self.send_json(active_app.delete_project(project_id))
                     if len(parts) == 4 and parts[3] == "cast":
-                        return self.send_json(app.save_cast(project_id, body))
+                        return self.send_json(active_app.save_cast(project_id, body))
                     if len(parts) == 4 and parts[3] == "run":
-                        return self.send_json(app.run_step(project_id, body["step"], body.get("chapter_id"), body))
+                        return self.send_json(active_app.run_step(project_id, body["step"], body.get("chapter_id"), body))
                     if len(parts) == 6 and parts[3] == "audio" and parts[5] == "regenerate-chunk":
-                        return self.send_json(app.regenerate_chunk(
+                        return self.send_json(active_app.regenerate_chunk(
                             project_id, parts[4],
                             int(body.get("chunk_index", 0)),
                             body.get("backend", "elevenlabs"),
@@ -837,9 +860,18 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
 
         def send_error_json(self, exc: Exception) -> None:
             try:
-                self.send_json({"ok": False, "error": str(exc)}, 500)
+                status = 401 if isinstance(exc, PermissionError) else 500
+                self.send_json({"ok": False, "error": str(exc)}, status)
             except (BrokenPipeError, ConnectionResetError):
                 return None
+
+        def active_app(self, request_path: str) -> NarratorWebApp:
+            if not request_path.startswith("/api/"):
+                return app
+            if not auth_service:
+                return app
+            user_id = auth_service.user_id_from_authorization(self.headers.get("Authorization"))
+            return app.for_user(user_id)
 
         def send_static(self, request_path: str) -> None:
             relative = "index.html" if request_path in {"", "/"} else request_path.lstrip("/")
@@ -858,11 +890,11 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                 },
             )
 
-        def serve_book_download(self, project_id: str) -> None:
+        def serve_book_download(self, active_app: NarratorWebApp, project_id: str) -> None:
             chapters_param = parse_qs(urlparse(self.path).query).get("chapters", [None])[0]
             chapter_ids = [c.strip() for c in chapters_param.split(",") if c.strip()] if chapters_param else None
             try:
-                data, filename = app.download_book_audio(project_id, chapter_ids)
+                data, filename = active_app.download_book_audio(project_id, chapter_ids)
             except ValueError as exc:
                 return self.send_error_json(exc)
             self.write_response(
@@ -876,10 +908,10 @@ def make_handler(app: NarratorWebApp) -> type[BaseHTTPRequestHandler]:
                 },
             )
 
-        def serve_audio_file(self, project_id: str, chapter_id: str) -> None:
-            project_id = app.safe_project_id(project_id)
-            chapter_id = app.safe_chapter_id(chapter_id)
-            audio_path = app.store.paths(project_id).audio / f"{chapter_id}.mp3"
+        def serve_audio_file(self, active_app: NarratorWebApp, project_id: str, chapter_id: str) -> None:
+            project_id = active_app.safe_project_id(project_id)
+            chapter_id = active_app.safe_chapter_id(chapter_id)
+            audio_path = active_app.store.paths(project_id).audio / f"{chapter_id}.mp3"
             if not audio_path.exists():
                 self.write_response(404, b"", {})
                 return
@@ -945,7 +977,8 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     app = NarratorWebApp(args.projects_dir)
-    server = ThreadingHTTPServer((args.host, args.port), make_handler(app))
+    auth_service = SupabaseAuthService.from_env()
+    server = ThreadingHTTPServer((args.host, args.port), make_handler(app, auth_service))
     print(f"Audiobook narrator UI running at http://{args.host}:{args.port}")
     server.serve_forever()
 

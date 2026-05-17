@@ -7,6 +7,29 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <div id="auth-shell" class="auth-shell">
+      <form id="auth-form" class="auth-card">
+        <h1>Narrator Studio</h1>
+        <div class="auth-tabs" role="tablist" aria-label="Account mode">
+          <button id="auth-sign-in-tab" type="button" class="active">Sign in</button>
+          <button id="auth-sign-up-tab" type="button">Create account</button>
+        </div>
+        <label>
+          <span>Email</span>
+          <input id="auth-email" type="email" autocomplete="email" required />
+        </label>
+        <label>
+          <span>Password</span>
+          <input id="auth-password" type="password" autocomplete="current-password" required />
+        </label>
+        <label id="auth-confirm-wrap" hidden>
+          <span>Confirm password</span>
+          <input id="auth-confirm-password" type="password" autocomplete="new-password" />
+        </label>
+        <p id="auth-message" class="auth-message"></p>
+        <button id="auth-submit" type="submit">Sign in</button>
+      </form>
+    </div>
     <div id="busy-overlay" class="busy-overlay" aria-live="polite" hidden></div>
     <div class="app-shell">
       <aside class="sidebar">
@@ -47,6 +70,10 @@
         </div>
 
         <div class="status" id="status">Ready</div>
+        <div id="account-row" class="account-row" hidden>
+          <span id="account-email"></span>
+          <button id="sign-out" type="button">Sign out</button>
+        </div>
         <div class="sidebar-resize-handle" id="sidebar-resize-handle" title="Drag to resize sidebar"></div>
       </aside>
 
@@ -227,6 +254,7 @@
       </div>
     </dialog>
 
-    <script src="/app.js?v=20260515-sequential-pipeline"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="/app.js?v=20260516-supabase-auth"></script>
   </body>
 </html>
