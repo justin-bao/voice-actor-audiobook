@@ -21,6 +21,15 @@ class WebAppFileActionsTest(unittest.TestCase):
             self.assertEqual(result["project_id"], "超禁忌游戏-4")
             self.assertTrue((Path(tmp) / "projects" / "超禁忌游戏-4" / "project.json").exists())
 
+    def test_for_user_scopes_projects_under_user_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            app = NarratorWebApp(Path(tmp) / "projects")
+            user_app = app.for_user("user-1")
+
+            user_app.create_project({"title": "Book"})
+
+            self.assertTrue((Path(tmp) / "projects" / "user-1" / "book" / "project.json").exists())
+
     def test_create_project_adds_suffix_for_duplicate_slug_with_different_title(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             app = NarratorWebApp(Path(tmp) / "projects")

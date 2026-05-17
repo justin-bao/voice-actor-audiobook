@@ -199,6 +199,47 @@ The mode is stored on the project config and passed through the full pipeline (a
 
 Individual chunks can be re-synthesized from the UI (↺ button on each passage) or the API (`POST /api/projects/{id}/audio/{chapter_id}/regenerate-chunk`). This sends only that chunk's passages to ElevenLabs and splices the new audio back into the combined file without re-running the full chapter.
 
+## Supabase Cloud Storage
+
+The runtime still works from local `projects/<project-id>/` folders, but you can now back up and restore a project through Supabase:
+
+- Postgres stores project and chapter metadata.
+- Supabase Storage keeps the full artifact tree, including source text, story memory, annotations, cast files, scripts, and generated audio.
+- The storage bucket is private by default. Artifacts are written under `<owner-id>/<project-id>/...`.
+
+Install the optional client and configure server-only credentials:
+
+```bash
+python3 -m pip install -e ".[supabase]"
+```
+
+```bash
+SUPABASE_URL=...
+SUPABASE_PUBLISHABLE_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
+SUPABASE_OWNER_ID=...
+```
+
+Apply the migration in `supabase/migrations/`, then sync a project:
+
+```bash
+audiobook-narrator cloud-push --project-id three-body
+audiobook-narrator cloud-pull --project-id three-body
+```
+
+`cloud-push` uploads the current local artifact tree and upserts metadata. `cloud-pull` restores the remote artifact tree into `projects/<owner-id>/<project-id>/`. Keep `SUPABASE_SERVICE_ROLE_KEY` on the server or your own machine only; it is intentionally not a browser credential.
+
+## Accounts
+
+The studio web UI now uses Supabase Auth for email/password accounts:
+
+- The browser uses `SUPABASE_PUBLISHABLE_KEY` for sign-up, sign-in, session refresh, and sign-out.
+- The Python server validates bearer tokens with Supabase before serving any `/api/*` route.
+- Local runtime files are isolated per user under `projects/<user-id>/<project-id>/`.
+- Existing database and Storage policies remain owner-scoped through Supabase user IDs.
+
+Hosted Supabase projects usually require email confirmation for new accounts by default, so a new user may need to confirm their email before the first sign-in.
+
 ## Providers
 
 By default, the pipeline runs in `heuristic` mode without network access — character names are detected by regex, summaries are the first 260 characters of chapter text, and performance direction is derived from punctuation and emotion markers. For full literary understanding and directed narration, configure an LLM:
@@ -249,6 +290,16 @@ audiobook-narrator synthesize --project-id three-body --chapter-id ch01 --backen
 ```
 
 The ElevenLabs backend writes MP3 chunk files under `audio/` and a `.parts.json` manifest recording speaker, voice, emotion, delivery, audio tags, and path for every generated segment.
+
+### Captioned Video Export
+
+After generating chapter audio, use the caption export button in the player to create:
+
+- `<chapter-id>.srt`
+- `<chapter-id>.ass`
+- `<chapter-id>.mp4`
+
+The MP4 uses the chapter audio with captions burned onto a black 1080p frame. If `LIBRETRANSLATE_URL` is set, the export adds English translations under the Chinese captions; `LIBRETRANSLATE_API_KEY` is optional for instances that require one. A self-hosted LibreTranslate instance keeps this path free/open-source.
 
 ## Supported Inputs
 

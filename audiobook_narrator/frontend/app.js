@@ -23,6 +23,11 @@ const state = {
   busyJobs: new Map(),
   pipelineCanceled: false,
   generatingChapters: new Set(),
+  authClient: null,
+  authMode: "sign-in",
+  session: null,
+  user: null,
+  audioObjectUrl: null,
 };
 
 let previewAudio = null;
@@ -113,15 +118,35 @@ function formatTime(seconds) {
 }
 
 function buildAudioTimings(totalDuration) {
-  const passages = (state.audioManifest || []).flatMap((chunk) => chunk.passages || []);
-  const totalChars = passages.reduce((sum, p) => sum + (p.text_chars || 1), 0);
-  let cumulative = 0;
-  audioTimings = passages.map((p) => {
-    const chars = p.text_chars || 1;
-    const start = (cumulative / totalChars) * totalDuration;
-    cumulative += chars;
-    const end = (cumulative / totalChars) * totalDuration;
-    return { start, end };
+  const chunks = state.audioManifest || [];
+  if (chunks.length && chunks.every((chunk) => Number(chunk.duration_seconds) > 0)) {
+    let chapterCursor = 0;
+    audioTimings = chunks.flatMap((chunk) => {
+      const timings = estimatePassageTimings(chunk.passages || [], Number(chunk.duration_seconds), chapterCursor);
+      chapterCursor += Number(chunk.duration_seconds);
+      return timings;
+    });
+    return;
+  }
+  audioTimings = estimatePassageTimings(
+    chunks.flatMap((chunk) => chunk.passages || []),
+    totalDuration,
+    0,
+  );
+}
+
+function estimatePassageTimings(passages, durationSeconds, offsetSeconds = 0) {
+  const pauseSeconds = passages.reduce((sum, p) => sum + Number(p.pause_after_ms || 0) / 1000, 0);
+  const speechSeconds = Math.max(0, durationSeconds - pauseSeconds);
+  const totalInputChars = passages.reduce((sum, p) => sum + Number(p.input_chars || p.text_chars || 1), 0);
+  let cursor = offsetSeconds;
+  return passages.map((p) => {
+    const chars = Number(p.input_chars || p.text_chars || 1);
+    const spoken = totalInputChars ? (chars / totalInputChars) * speechSeconds : 0;
+    const pause = Number(p.pause_after_ms || 0) / 1000;
+    const start = cursor;
+    cursor += spoken + pause;
+    return { start, end: cursor };
   });
 }
 
@@ -202,6 +227,9 @@ function initAudioPlayer() {
 
   const regenBtn = $("audio-regen-btn");
   if (regenBtn) regenBtn.addEventListener("click", () => runStep("synthesize"));
+
+  const captionExportBtn = $("audio-caption-export-btn");
+  if (captionExportBtn) captionExportBtn.addEventListener("click", () => runStep("captioned_video"));
 
   const speedSelect = $("audio-speed");
   if (speedSelect) {
@@ -289,6 +317,7 @@ function renderAudioPlayer() {
           <option value="2">2x</option>
         </select>
       </label>
+      <button id="audio-caption-export-btn" class="audio-regen-btn" title="Export captioned MP4">▣</button>
       <button id="audio-regen-btn" class="audio-regen-btn" title="Regenerate audio for entire chapter">↺</button>
     </div>
   `;
@@ -306,13 +335,113 @@ function extractInlineTags(text) {
 }
 
 async function api(path, options = {}) {
+  const token = state.session?.access_token;
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(options.headers || {}),
+    },
   });
   const payload = await response.json();
   if (!response.ok || payload.ok === false) throw new Error(payload.error || response.statusText);
   return payload;
+}
+
+function renderAuthState() {
+  const signedIn = Boolean(state.session && state.user);
+  $("auth-shell").hidden = signedIn;
+  $("account-row").hidden = !signedIn;
+  $("account-email").textContent = state.user?.email || "";
+}
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  const isSignUp = mode === "sign-up";
+  $("auth-sign-in-tab").classList.toggle("active", !isSignUp);
+  $("auth-sign-up-tab").classList.toggle("active", isSignUp);
+  $("auth-confirm-wrap").hidden = !isSignUp;
+  $("auth-password").autocomplete = isSignUp ? "new-password" : "current-password";
+  $("auth-submit").textContent = isSignUp ? "Create account" : "Sign in";
+  $("auth-message").textContent = "";
+}
+
+async function initAuth() {
+  const config = await fetch("/api/config").then((response) => response.json());
+  state.authClient = window.supabase.createClient(
+    config.supabase_url,
+    config.supabase_publishable_key,
+  );
+  const { data } = await state.authClient.auth.getSession();
+  state.session = data.session;
+  state.user = data.session?.user || null;
+  renderAuthState();
+  state.authClient.auth.onAuthStateChange((_event, session) => {
+    state.session = session;
+    state.user = session?.user || null;
+    renderAuthState();
+  });
+}
+
+async function submitAuthForm(event) {
+  event.preventDefault();
+  const email = $("auth-email").value.trim();
+  const password = $("auth-password").value;
+  const confirmPassword = $("auth-confirm-password").value;
+  if (state.authMode === "sign-up" && password !== confirmPassword) {
+    $("auth-message").textContent = "Passwords do not match.";
+    return;
+  }
+  $("auth-submit").disabled = true;
+  try {
+    const result = state.authMode === "sign-up"
+      ? await state.authClient.auth.signUp({ email, password })
+      : await state.authClient.auth.signInWithPassword({ email, password });
+    if (result.error) throw result.error;
+    if (!result.data.session) {
+      $("auth-message").textContent = "Check your email to confirm the account, then sign in.";
+      return;
+    }
+    state.session = result.data.session;
+    state.user = result.data.user;
+    renderAuthState();
+    await refreshProjects();
+  } catch (error) {
+    $("auth-message").textContent = error.message;
+  } finally {
+    $("auth-submit").disabled = false;
+  }
+}
+
+async function signOut() {
+  await state.authClient.auth.signOut();
+  state.session = null;
+  state.user = null;
+  state.projects = [];
+  state.project = null;
+  clearChapterUi();
+  $("project-select").innerHTML = "";
+  $("project-meta").textContent = "No book loaded";
+  renderAuthState();
+}
+
+async function fetchProtectedBlob(path) {
+  const response = await fetch(path, {
+    headers: state.session?.access_token ? { Authorization: `Bearer ${state.session.access_token}` } : {},
+  });
+  if (!response.ok) throw new Error(response.statusText);
+  return response.blob();
+}
+
+async function protectedObjectUrl(path) {
+  if (state.audioObjectUrl) {
+    URL.revokeObjectURL(state.audioObjectUrl);
+    state.audioObjectUrl = null;
+  }
+  const blob = await fetchProtectedBlob(path);
+  state.audioObjectUrl = URL.createObjectURL(blob);
+  return state.audioObjectUrl;
 }
 
 function setStatus(message) {
@@ -447,6 +576,7 @@ async function loadProject(projectId, chapterId = null) {
   state.annotatedText = payload.annotated_text || "";
   state.chapters = payload.chapters || [];
   state.cast = payload.cast;
+  state.audioUrl = payload.audio_url ? await protectedObjectUrl(payload.audio_url) : null;
   renderProject(payload);
   ensureElevenLabsVoicesLoaded();
   setStatus(`${payload.config.title} loaded`);
@@ -457,7 +587,6 @@ function renderProject(payload) {
   $("project-select").value = payload.config.project_id;
   $("narration-mode").value = payload.config.narration_mode || "multi_voice";
   state.audioManifest = payload.audio_manifest || null;
-  state.audioUrl = payload.audio_url || null;
   renderToc();
   const chapter = payload.chapters.find((c) => c.chapter_id === payload.selected_chapter_id);
   $("chapter-id").value = payload.selected_chapter_id || "ch01";
@@ -1406,6 +1535,7 @@ async function runStep(step) {
   await ensureNotificationPermission();
   const busyCopy = {
     synthesize: ["Generating", "Creating narration output..."],
+    captioned_video: ["Exporting", "Rendering captioned MP4..."],
   }[step] || ["Working", "Processing..."];
   const chapterId = state.selectedChapterId;
   setBusy(true, busyCopy[0], busyCopy[1]);
@@ -1606,18 +1736,23 @@ function openDownloadModal() {
   $("download-modal").showModal();
 }
 
-function startDownload() {
+async function startDownload() {
   const chapterIds = Array.from(document.querySelectorAll(".download-chapter-check:checked"))
     .map((cb) => cb.value);
   if (!chapterIds.length) return;
   $("download-modal").close();
   const params = new URLSearchParams({ chapters: chapterIds.join(",") });
+  const blob = await fetchProtectedBlob(
+    `/api/projects/${encodeURIComponent(state.project.project_id)}/download?${params}`,
+  );
+  const objectUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = `/api/projects/${encodeURIComponent(state.project.project_id)}/download?${params}`;
+  a.href = objectUrl;
   a.download = "";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(objectUrl);
 }
 
 function openGenerateModal() {
@@ -1650,7 +1785,7 @@ async function startGenerate() {
     chapterId: null,
     cancellable: false,
   });
-  const promises = chapterIds.map(async (chapterId) => {
+  await runWithConcurrency(chapterIds, 5, async (chapterId) => {
     try {
       await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
         method: "POST",
@@ -1674,7 +1809,6 @@ async function startGenerate() {
       renderToc();
     }
   });
-  await Promise.allSettled(promises);
   removeBusyJob("batch-generate");
   if (state.selectedChapterId && chapterIds.includes(state.selectedChapterId)) {
     await loadProject(state.project.project_id, state.selectedChapterId);
@@ -1682,6 +1816,17 @@ async function startGenerate() {
   const successCount = total - failed;
   setStatus(failed ? `Generated ${successCount} of ${total} (${failed} failed)` : "Generation complete");
   if (successCount > 0) showToast(`Generated ${successCount} chapter${successCount > 1 ? "s" : ""}${failed ? ` (${failed} failed)` : ""}`);
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const queue = [...items];
+  const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      await worker(item);
+    }
+  });
+  await Promise.allSettled(runners);
 }
 
 function wireSidebarResize() {
@@ -1755,6 +1900,10 @@ function wireEvents() {
   });
 
   $("project-select").addEventListener("change", (event) => loadProject(event.target.value));
+  $("auth-form").addEventListener("submit", submitAuthForm);
+  $("auth-sign-in-tab").addEventListener("click", () => setAuthMode("sign-in"));
+  $("auth-sign-up-tab").addEventListener("click", () => setAuthMode("sign-up"));
+  $("sign-out").addEventListener("click", signOut);
   $("busy-overlay").addEventListener("click", (event) => {
     const button = event.target.closest(".busy-cancel");
     if (!button) return;
@@ -2032,7 +2181,9 @@ window.addEventListener("DOMContentLoaded", async () => {
   wireEvents();
   wireSidebarResize();
   try {
-    await refreshProjects();
+    setAuthMode("sign-in");
+    await initAuth();
+    if (state.session) await refreshProjects();
   } catch (error) {
     setStatus(error.message);
   }
