@@ -39,6 +39,44 @@ let activePassageIndex = -1;
 let userIsSeeking = false;
 let passageChunkMap = {};
 
+const APP_TITLE = "Narrator Studio";
+
+// Toast container — appended to body once at module load
+const toastContainer = (() => {
+  const el = document.createElement("div");
+  el.className = "toast-container";
+  el.setAttribute("aria-live", "polite");
+  document.body.appendChild(el);
+  return el;
+})();
+
+function showToast(message, { type = "success", duration = 4000 } = {}) {
+  const toast = document.createElement("div");
+  toast.className = `toast toast-${type}`;
+  toast.innerHTML = `<span class="toast-msg">${escapeHtml(message)}</span><button class="toast-dismiss" aria-label="Dismiss">×</button>`;
+  toastContainer.appendChild(toast);
+
+  const dismiss = () => {
+    toast.addEventListener("transitionend", () => toast.remove(), { once: true });
+    toast.classList.add("toast-out");
+  };
+  toast.querySelector(".toast-dismiss").addEventListener("click", dismiss);
+  if (duration > 0) setTimeout(dismiss, duration);
+
+  if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+    new Notification(APP_TITLE, { body: message });
+  }
+}
+
+async function ensureNotificationPermission() {
+  if (!("Notification" in window) || Notification.permission !== "default") return;
+  try { await Notification.requestPermission(); } catch { /* unsupported */ }
+}
+
+function updateDocumentTitle() {
+  document.title = state.busyJobs.size > 0 ? `⏳ ${APP_TITLE}` : APP_TITLE;
+}
+
 function playVoicePreview(voiceId) {
   const voice = state.elevenVoices.find((v) => v.voice_id === voiceId);
   if (!voice?.preview_url) return;
@@ -429,6 +467,7 @@ function removeBusyJob(jobId) {
 }
 
 function renderBusyJobs() {
+  updateDocumentTitle();
   const overlay = $("busy-overlay");
   const jobs = [...state.busyJobs.entries()];
   overlay.hidden = jobs.length === 0;
@@ -474,13 +513,13 @@ function stopSynthesisProgressPolling() {
   state.progressPollTimer = null;
 }
 
-function startSynthesisProgressPolling() {
+function startSynthesisProgressPolling(chapterId) {
   stopSynthesisProgressPolling();
   const poll = async () => {
-    if (!state.project || !state.selectedChapterId) return;
+    if (!state.project || !chapterId) return;
     try {
       const progress = await api(
-        `/api/projects/${encodeURIComponent(state.project.project_id)}/synthesis-progress?chapter=${encodeURIComponent(state.selectedChapterId)}`
+        `/api/projects/${encodeURIComponent(state.project.project_id)}/synthesis-progress?chapter=${encodeURIComponent(chapterId)}`
       );
       setBusyProgress(progress);
       if (progress.total_chunks) {
@@ -1034,7 +1073,8 @@ async function saveChapterPage({ silent = false } = {}) {
     await saveCharacterVoiceAssignments();
     if (!silent) {
       await loadProject(state.project.project_id, state.selectedChapterId);
-      setStatus("Chapter page saved");
+      setStatus("Saved");
+      showSavedIndicator();
     }
   } catch (error) {
     setStatus(`Save failed: ${error.message}`);
@@ -1326,18 +1366,21 @@ async function runAnalyzeAnnotateBook() {
   if (!state.project) return;
   const pending = state.chapters.filter((chapter) => !chapter.analyzed || !chapter.annotated);
   if (!pending.length) {
-    setStatus("All chapters are already analyzed and annotated");
+    setStatus("All chapters are already annotated");
     return;
   }
+  await ensureNotificationPermission();
+  const total = pending.length;
+  let doneCount = 0;
   state.pipelineCanceled = false;
-  setStatus(`Analyze + Annotate started for ${pending.length} chapter${pending.length === 1 ? "" : "s"}`);
+  setStatus(`Annotate started for ${total} chapter${total === 1 ? "" : "s"}`);
   try {
     for (const chapter of pending) {
       if (state.pipelineCanceled) break;
       if (!chapter.analyzed) {
         upsertBusyJob(chapter.chapter_id, {
-          title: "Analyzing",
-          detail: `Updating memory for ${chapter.title || chapter.chapter_id}...`,
+          title: `Analyzing (${doneCount + 1}/${total})`,
+          detail: chapter.title || chapter.chapter_id,
           chapterId: chapter.chapter_id,
           cancellable: true,
           controller: new AbortController(),
@@ -1351,8 +1394,8 @@ async function runAnalyzeAnnotateBook() {
       if (state.pipelineCanceled) break;
       if (!chapter.annotated) {
         upsertBusyJob(chapter.chapter_id, {
-          title: "Annotating",
-          detail: `Directing ${chapter.title || chapter.chapter_id}...`,
+          title: `Annotating (${doneCount + 1}/${total})`,
+          detail: chapter.title || chapter.chapter_id,
           chapterId: chapter.chapter_id,
           cancellable: true,
           controller: new AbortController(),
@@ -1361,12 +1404,18 @@ async function runAnalyzeAnnotateBook() {
         renderToc();
         await runChapterStep("annotate", chapter.chapter_id, { reload: false, controller: state.busyJobs.get(chapter.chapter_id)?.controller });
         removeBusyJob(chapter.chapter_id);
-        updateLocalChapterState(chapter.chapter_id, { annotated: true, pipeline_state: "complete", pipeline_message: "Analysis and annotation complete." });
+        updateLocalChapterState(chapter.chapter_id, { annotated: true, pipeline_state: "complete", pipeline_message: "Annotation complete." });
       }
+      doneCount++;
       renderToc();
     }
     await loadProject(state.project.project_id, state.selectedChapterId);
-    setStatus(state.pipelineCanceled ? "Analyze + Annotate canceled" : "Analyze + Annotate complete");
+    if (state.pipelineCanceled) {
+      setStatus("Annotate canceled");
+    } else {
+      setStatus("Annotate complete");
+      showToast(`Annotate complete — ${total} chapter${total === 1 ? "" : "s"}`);
+    }
   } catch (error) {
     const failed = [...state.busyJobs.values()].find((job) => job.chapterId)?.chapterId;
     if (failed) {
@@ -1375,10 +1424,70 @@ async function runAnalyzeAnnotateBook() {
       renderToc();
     }
     setStatus(error.message);
+    showToast(error.message, { type: "error", duration: 0 });
   } finally {
     state.busyJobs.clear();
     renderBusyJobs();
   }
+}
+
+async function annotateCurrentChapter() {
+  if (!state.project || !state.selectedChapterId) return;
+  await ensureNotificationPermission();
+  const chapter = state.chapters.find((c) => c.chapter_id === state.selectedChapterId);
+  const chapterId = state.selectedChapterId;
+  try {
+    if (!chapter?.analyzed) {
+      const controller = new AbortController();
+      upsertBusyJob(chapterId, {
+        title: "Analyzing",
+        detail: "Updating story memory...",
+        chapterId,
+        cancellable: true,
+        controller,
+      });
+      setStatus("Analysis started");
+      await runChapterStep("analyze", chapterId, { reload: false, controller });
+      removeBusyJob(chapterId);
+    }
+    const result = await runChapterStep("annotate", chapterId);
+    if (result !== null) showToast("Annotation complete");
+  } catch (err) {
+    removeBusyJob(chapterId);
+    if (err.name !== "AbortError") showToast(err.message, { type: "error", duration: 0 });
+  }
+}
+
+async function saveInspector() {
+  if (!state.project) return;
+  try {
+    const memory = collectMemory();
+    await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/memory`, {
+      method: "POST",
+      body: JSON.stringify(memory),
+    });
+    state.memory = memory;
+    if (state.selectedChapterId) {
+      const chapterMemory = collectChapterMemory();
+      await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/chapter-memory/${encodeURIComponent(state.selectedChapterId)}`, {
+        method: "POST",
+        body: JSON.stringify(chapterMemory),
+      });
+      state.chapterMemory = chapterMemory;
+    }
+    await saveCharacterVoiceAssignments();
+    renderCharacters();
+    setStatus("Saved");
+  } catch (error) {
+    setStatus(`Save failed: ${error.message}`);
+  }
+}
+
+function showSavedIndicator() {
+  const btn = $("save-chapter");
+  if (!btn) return;
+  btn.classList.add("is-saved");
+  setTimeout(() => btn.classList.remove("is-saved"), 2000);
 }
 
 async function runChapterStep(step, chapterId = state.selectedChapterId, { reload = true, controller = null } = {}) {
@@ -1423,27 +1532,31 @@ async function runChapterStep(step, chapterId = state.selectedChapterId, { reloa
 
 async function runStep(step) {
   if (!state.project) return;
+  await ensureNotificationPermission();
   const busyCopy = {
     synthesize: ["Generating", "Creating narration output..."],
     captioned_video: ["Exporting", "Rendering captioned MP4..."],
   }[step] || ["Working", "Processing..."];
+  const chapterId = state.selectedChapterId;
   setBusy(true, busyCopy[0], busyCopy[1]);
-  if (step === "synthesize") startSynthesisProgressPolling();
+  if (step === "synthesize") startSynthesisProgressPolling(chapterId);
   setStatus(`${step} started`);
   try {
     const payload = await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
       method: "POST",
       body: JSON.stringify({
         step,
-        chapter_id: state.selectedChapterId,
+        chapter_id: chapterId,
         backend: "elevenlabs",
       }),
     });
-    await loadProject(state.project.project_id, state.selectedChapterId);
+    await loadProject(state.project.project_id, chapterId);
     const llm = payload.llm ? ` with ${payload.llm.provider}${payload.llm.model ? ` (${payload.llm.model})` : ""}` : "";
     setStatus(`${step} complete${llm}`);
+    showToast("Generation complete");
   } catch (error) {
     setStatus(error.message);
+    showToast(error.message, { type: "error", duration: 0 });
   } finally {
     if (step === "synthesize") stopSynthesisProgressPolling();
     setBusy(false);
@@ -1659,9 +1772,19 @@ async function startGenerate() {
     .map((cb) => cb.value);
   if (!chapterIds.length) return;
   $("generate-modal").close();
+  await ensureNotificationPermission();
+  const total = chapterIds.length;
+  let completed = 0;
+  let failed = 0;
   chapterIds.forEach((id) => state.generatingChapters.add(id));
   renderToc();
-  setStatus(`Generating ${chapterIds.length} chapter${chapterIds.length > 1 ? "s" : ""}…`);
+  setStatus(`Generating ${total} chapter${total > 1 ? "s" : ""}…`);
+  upsertBusyJob("batch-generate", {
+    title: `Generating 0 of ${total}`,
+    detail: `${total} chapter${total > 1 ? "s" : ""} queued`,
+    chapterId: null,
+    cancellable: false,
+  });
   await runWithConcurrency(chapterIds, 5, async (chapterId) => {
     try {
       await api(`/api/projects/${encodeURIComponent(state.project.project_id)}/run`, {
@@ -1671,16 +1794,28 @@ async function startGenerate() {
       const chapter = state.chapters.find((c) => c.chapter_id === chapterId);
       if (chapter) chapter.has_audio = true;
     } catch (err) {
+      failed++;
+      showToast(`Generate failed: ${err.message}`, { type: "error", duration: 0 });
       setStatus(`Generate failed for ${chapterId}: ${err.message}`);
     } finally {
+      completed++;
       state.generatingChapters.delete(chapterId);
+      upsertBusyJob("batch-generate", {
+        title: `Generating ${completed} of ${total}`,
+        detail: completed < total ? `${total - completed} remaining…` : "Wrapping up…",
+        chapterId: null,
+        cancellable: false,
+      });
       renderToc();
     }
   });
+  removeBusyJob("batch-generate");
   if (state.selectedChapterId && chapterIds.includes(state.selectedChapterId)) {
     await loadProject(state.project.project_id, state.selectedChapterId);
   }
-  setStatus(`Generation complete`);
+  const successCount = total - failed;
+  setStatus(failed ? `Generated ${successCount} of ${total} (${failed} failed)` : "Generation complete");
+  if (successCount > 0) showToast(`Generated ${successCount} chapter${successCount > 1 ? "s" : ""}${failed ? ` (${failed} failed)` : ""}`);
 }
 
 async function runWithConcurrency(items, limit, worker) {
@@ -1836,11 +1971,9 @@ function wireEvents() {
     await reorderChapters(ids);
   });
   $("save-chapter").addEventListener("click", () => saveChapterPage());
+  $("save-inspector").addEventListener("click", saveInspector);
   $("reset-annotations").addEventListener("click", resetAnnotations);
   $("delete-book").addEventListener("click", deleteCurrentBook);
-  $("save-memory").addEventListener("click", saveMemory);
-  $("save-characters").addEventListener("click", saveCharacterProfiles);
-  $("save-cast").addEventListener("click", saveCast);
   $("add-cast").addEventListener("click", addCast);
   $("run-pipeline").addEventListener("click", runAnalyzeAnnotateBook);
   $("narration-mode").addEventListener("change", async () => {
@@ -1858,8 +1991,7 @@ function wireEvents() {
     }
   });
   $("synthesize").addEventListener("click", () => runStep("synthesize"));
-  $("analyze-chapter").addEventListener("click", () => runChapterStep("analyze"));
-  $("annotate-chapter").addEventListener("click", () => runChapterStep("annotate"));
+  $("annotate-chapter").addEventListener("click", annotateCurrentChapter);
   $("open-generate-modal").addEventListener("click", openGenerateModal);
   $("start-generate").addEventListener("click", startGenerate);
   $("generate-select-all").addEventListener("click", () => {
@@ -1873,7 +2005,6 @@ function wireEvents() {
   });
   $("toggle-inspector").addEventListener("click", () => setInspectorOpen(true));
   $("close-inspector").addEventListener("click", () => setInspectorOpen(false));
-  $("import-file").addEventListener("click", () => $("file-input").click());
   $("sidebar-import-file").addEventListener("click", () => $("file-input").click());
   $("download-book-audio").addEventListener("click", () => {
     if (!state.project) return;

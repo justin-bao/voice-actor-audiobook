@@ -111,7 +111,7 @@ class Passage(BaseModel):
     delivery: Delivery = Delivery.matter_of_fact
     pace: str = "medium"
     intensity: int = Field(default=3, ge=1, le=5)
-    pause_after_ms: int = 350
+    pause_after_ms: int = 700
     pronunciation_hints: dict[str, str] = Field(default_factory=dict)
     audio_tags: list[str] = Field(default_factory=list)
     rationale: str = ""

@@ -603,7 +603,7 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(extension_for_backend("elevenlabs"), ".mp3")
         self.assertEqual(chunks[0]["inputs"][0]["voice_id"], "voice-default")
         self.assertEqual(chunks[0]["inputs"][1]["voice_id"], "voice-wang")
-        self.assertEqual(chunks[0]["inputs"][1]["text"], "[whispers] “你好。”汪淼说。")
+        self.assertEqual(chunks[0]["inputs"][1]["text"], "[whispers] “你好。”汪淼说。 [pause]")
         self.assertEqual(chunks[0]["manifest"][1]["audio_tags"], ["[whispers]"])
 
     def test_elevenlabs_stream_dialogue_logs_success(self) -> None:

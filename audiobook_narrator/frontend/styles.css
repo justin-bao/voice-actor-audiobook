@@ -218,26 +218,12 @@ textarea:focus-visible {
   text-transform: uppercase;
 }
 
-.side-actions {
+.narration-mode-wrap {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-#run-pipeline {
-  grid-column: 1 / -1;
-}
-
-.mode-label {
-  grid-column: 1 / -1;
-  font-size: 11px;
-  color: #7a9e8e;
-  margin-top: 4px;
-  margin-bottom: -4px;
+  gap: 6px;
 }
 
 #narration-mode {
-  grid-column: 1 / -1;
   font-size: 12px;
   border: 1px solid #3c594f;
   border-radius: 6px;
@@ -245,6 +231,14 @@ textarea:focus-visible {
   padding: 4px 8px;
   color: #1a3a2a;
   cursor: pointer;
+  min-height: 36px;
+  width: 100%;
+}
+
+.side-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .side-actions button,
@@ -627,6 +621,76 @@ body.sidebar-resizing .sidebar-resize-handle {
   }
 }
 
+/* Toast notifications */
+.toast-container {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 30;
+  display: grid;
+  gap: 8px;
+  pointer-events: none;
+  max-width: min(400px, calc(100vw - 32px));
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 16px;
+  border-radius: 8px;
+  background: #1a3a2a;
+  color: #e8f5ee;
+  font-size: 14px;
+  line-height: 1.4;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  pointer-events: auto;
+  animation: toast-in 0.18s ease;
+  transition: opacity 0.2s, transform 0.2s;
+}
+
+.toast.toast-success {
+  border-left: 3px solid #50c090;
+}
+
+.toast.toast-error {
+  background: #3d1e1e;
+  border-left: 3px solid #ff6b6b;
+  color: #ffe8e8;
+}
+
+.toast-msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-dismiss {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  opacity: 0.55;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.toast-dismiss:hover {
+  opacity: 1;
+}
+
+.toast.toast-out {
+  opacity: 0;
+  transform: translateY(-6px);
+  pointer-events: none;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(420px, 1.1fr) minmax(380px, 0.9fr);
@@ -667,9 +731,9 @@ body.sidebar-resizing .sidebar-resize-handle {
 
 .toolbar {
   display: grid;
-  grid-template-columns: minmax(260px, 0.9fr) minmax(0, 1.1fr);
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1fr) 44px;
   gap: 10px;
-  align-items: end;
+  align-items: center;
   padding: 14px;
   border-bottom: 1px solid var(--line);
   background: #ffffff;
@@ -705,21 +769,17 @@ body.sidebar-resizing .sidebar-resize-handle {
   display: none;
 }
 
-.chapter-fields {
-  display: grid;
-  grid-template-columns: 140px minmax(180px, 1fr);
-  gap: 8px;
-  min-width: 0;
-  width: 100%;
-}
-
-.chapter-fields label {
+.chapter-title-label {
   display: grid;
   gap: 4px;
-  margin: 0;
+  min-width: 0;
   color: var(--muted);
   font-size: 11px;
   text-transform: uppercase;
+}
+
+.chapter-title-label input {
+  width: 100%;
 }
 
 .toolbar-actions,
@@ -741,8 +801,9 @@ body.sidebar-resizing .sidebar-resize-handle {
   white-space: nowrap;
 }
 
-.toolbar-details {
-  margin-left: auto;
+.toolbar-save.is-saved {
+  color: var(--accent-2);
+  border-color: var(--accent-2);
 }
 
 input,
@@ -929,11 +990,15 @@ textarea {
 .drawer-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   min-height: 48px;
   padding: 0 12px 0 18px;
   border-bottom: 1px solid var(--line);
   background: #fff;
+}
+
+.drawer-head strong {
+  flex: 1;
 }
 
 .tabs {
@@ -1336,9 +1401,20 @@ button.armed {
 }
 
 @media (max-width: 640px) {
-  .toolbar,
+  .toolbar {
+    grid-template-columns: 1fr 44px;
+  }
+
+  .chapter-title-label {
+    grid-column: 1 / 2;
+  }
+
+  #toggle-inspector {
+    grid-row: 1;
+    grid-column: 2;
+  }
+
   .toolbar-actions,
-  .chapter-fields,
   .character-grid,
   .annotation-header,
   .annotation-header.has-audio,
@@ -1347,6 +1423,10 @@ button.armed {
     grid-template-columns: 1fr;
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .toolbar-actions {
+    grid-column: 1 / -1;
   }
 
   .book-controls {
